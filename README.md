@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="icons/glippy.png" alt="Tooltip Companion Logo" width="128" height="128">
+
   
   # 📎 Tooltip Companion
   
