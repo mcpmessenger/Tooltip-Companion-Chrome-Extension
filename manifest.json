@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Tooltip Companion",
+  "version": "1.4.1",
+  "description": "AI-powered tooltip previews for links with context-aware assistance. Visit tooltipcompanion.com",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "tabs",
+    "activeTab",
+    "windows"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/icon128.svg", "icons/glippy.png"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "homepage_url": "https://tooltipcompanion.com",
+  "privacy_policy": "https://tooltipcompanion.com/privacy"
+}

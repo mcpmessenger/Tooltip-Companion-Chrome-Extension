@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Tooltip Companion Settings</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            padding: 0;
+            margin: 0;
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 50%, #0f0f0f 100%);
+            color: #e8e8e8;
+            min-height: 100vh;
+            position: relative;
+            overflow-x: hidden;
+            font-weight: 400;
+            letter-spacing: 0.01em;
+        }
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: 
+                radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.03) 0%, transparent 50%),
+                radial-gradient(circle at 80% 70%, rgba(255, 255, 255, 0.02) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+        
+        .header {
+            background: rgba(15, 15, 15, 0.6);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 40px 30px;
+            color: white;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 10px;
+            min-height: 56px;
+        }
+        
+        .logo {
+            width: 56px;
+            height: 56px;
+            min-width: 56px;
+            min-height: 56px;
+            flex-shrink: 0;
+            object-fit: contain;
+            display: block;
+            filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.1));
+        }
+        
+        h1 {
+            margin: 0;
+            font-size: 32px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #ffffff;
+        }
+        
+        .subtitle {
+            margin: 5px 0 0 0;
+            opacity: 0.8;
+            font-size: 15px;
+            font-weight: 300;
+            letter-spacing: 0.02em;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 0 30px;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .section {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            padding: 35px;
+            border-radius: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 
+                0 8px 32px rgba(0, 0, 0, 0.4),
+                0 0 1px rgba(255, 255, 255, 0.1);
+        }
+        
+        .section-title {
+            margin: 0 0 25px 0;
+            font-size: 22px;
+            font-weight: 600;
+            color: #ffffff;
+            letter-spacing: -0.01em;
+        }
+        
+        label {
+            display: block;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-weight: 500;
+            font-size: 14px;
+            color: #e8e8e8;
+            letter-spacing: 0.01em;
+        }
+        
+        input[type="url"], input[type="password"] {
+            width: 100%;
+            padding: 14px 16px;
+            margin-top: 5px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #ffffff;
+            font-size: 15px;
+            font-family: 'Montserrat', sans-serif;
+            transition: all 0.2s;
+            font-weight: 400;
+        }
+        
+        input::placeholder {
+            color: rgba(255, 255, 255, 0.4);
+            font-weight: 300;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: rgba(255, 255, 255, 0.25);
+            background: rgba(0, 0, 0, 0.4);
+            box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+        }
+        
+        button {
+            padding: 14px 28px;
+            margin-top: 25px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            color: #ffffff;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 500;
+            font-family: 'Montserrat', sans-serif;
+            transition: all 0.2s;
+            letter-spacing: 0.01em;
+        }
+        
+        button:hover {
+            background: rgba(255, 255, 255, 0.15);
+            border-color: rgba(255, 255, 255, 0.25);
+            transform: translateY(-1px);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        #status {
+            margin-top: 15px;
+            font-weight: 500;
+            padding: 14px 16px;
+            border-radius: 12px;
+            display: none;
+            font-size: 14px;
+        }
+        
+        #status.success {
+            background: rgba(76, 175, 80, 0.2);
+            color: #81c784;
+            border: 1px solid rgba(76, 175, 80, 0.3);
+        }
+        
+        #status.error {
+            background: rgba(244, 67, 54, 0.2);
+            color: #ef5350;
+            border: 1px solid rgba(244, 67, 54, 0.3);
+        }
+        
+        .info-text {
+            margin-top: 15px;
+            font-size: 13px;
+            color: rgba(255, 255, 255, 0.6);
+            font-weight: 300;
+            line-height: 1.6;
+        }
+        
+        .info-text a {
+            color: rgba(255, 255, 255, 0.9);
+            text-decoration: none;
+            font-weight: 400;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+            transition: all 0.2s;
+        }
+        
+        .info-text a:hover {
+            color: #ffffff;
+            border-bottom-color: rgba(255, 255, 255, 0.6);
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 40px 30px;
+            margin-top: 50px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            opacity: 0.7;
+            font-size: 13px;
+            position: relative;
+            z-index: 1;
+            font-weight: 300;
+        }
+        
+        .footer a {
+            color: rgba(255, 255, 255, 0.9);
+            text-decoration: none;
+            font-weight: 400;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.2s;
+        }
+        
+        .footer a:hover {
+            color: #ffffff;
+            border-bottom-color: rgba(255, 255, 255, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo-container">
+            <img src="" alt="Tooltip Companion Logo" class="logo" id="logo-img">
+            <div>
+                <h1>Tooltip Companion</h1>
+                <p class="subtitle">Configure your AI-powered browsing assistant</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="section">
+            <h2 class="section-title">Settings</h2>
+
+            <label for="backendUrl">Backend Service URL</label>
+            <input type="url" id="backendUrl" placeholder="http://localhost:3000" required>
+
+            <label for="openaiKey">OpenAI API Key (Optional - for AI chat features)</label>
+            <input type="password" id="openaiKey" placeholder="sk-proj-...">
+            
+            <button id="saveButton">Save Settings</button>
+            <div id="status"></div>
+            
+            <p class="info-text">
+                Get your OpenAI API key at: <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a><br>
+                API keys are securely stored locally in your browser. For cloud sync with Google Auth, visit <a href="https://tooltipcompanion.com" target="_blank">tooltipcompanion.com</a>
+            </p>
+        </div>
+    </div>
+    
+    <div class="footer">
+        Tooltip Companion v1.3.0 • <a href="https://tooltipcompanion.com" target="_blank">tooltipcompanion.com</a> • <a href="https://tooltipcompanion.com/privacy" target="_blank">Privacy Policy</a>
+    </div>
+
+    <script src="options.js"></script>
+</body>
+</html>
