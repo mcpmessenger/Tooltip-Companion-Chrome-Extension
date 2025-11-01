@@ -164,14 +164,17 @@ async function captureScreenshot(url) {
         
         const page = await context.newPage();
         
+        // Set default timeout for page operations
+        page.setDefaultTimeout(25000); // 25 seconds for page operations
+        
         // Navigate to URL with faster loading strategy
         await page.goto(url, { 
             waitUntil: 'domcontentloaded', // Much faster than networkidle
-            timeout: 10000 // Reduced from 30s to 10s
+            timeout: 25000 // 25 seconds - balance between speed and reliability
         });
         
         // Wait a bit for content to render (faster than networkidle)
-        await page.waitForTimeout(500); // Wait 500ms for dynamic content
+        await page.waitForTimeout(1000); // Wait 1s for dynamic content to render
         
         // Take screenshot with smaller dimensions
         const screenshot = await page.screenshot({
@@ -218,16 +221,28 @@ async function captureScreenshot(url) {
         } catch (error) {
             console.error(`❌ Error capturing screenshot for ${url}:`, error.message);
             
-            // Check if it's a timeout or network error
-            if (error.message.includes('Navigation') || error.message.includes('timeout')) {
-                console.warn(`   ⏱️ Page load timeout - this site may be slow or blocked`);
+            // Create a more specific error with better messaging
+            let enhancedError = error;
+            const hostname = new URL(url).hostname;
+            
+            // Check if it's a timeout or navigation error
+            if (error.message.includes('Navigation') || 
+                error.message.includes('timeout') || 
+                error.message.includes('Timeout')) {
+                console.warn(`   ⏱️ Page load timeout - this site may be slow, blocking bots, or have strict security`);
+                enhancedError = new Error(`Page load timeout: ${hostname} took too long to load. The site may be slow, blocking automated access, or require authentication.`);
+                enhancedError.isTimeout = true;
             }
             
-            // Check if it's a 500 or server error - mark as blocked
-            if (error.message.includes('500') || error.message.includes('Internal Server Error')) {
-                const hostname = new URL(url).hostname;
+            // Check if it's a 403/404/500 server error - mark as blocked
+            if (error.message.includes('403') || 
+                error.message.includes('404') || 
+                error.message.includes('500') || 
+                error.message.includes('Internal Server Error') ||
+                error.message.includes('net::ERR_BLOCKED_BY_CLIENT')) {
                 blockedSites.add(hostname);
                 console.warn(`   🚫 Server blocked this request - will skip for 1 hour`);
+                enhancedError.isBlocked = true;
                 
                 // Auto-clear blocked sites after 1 hour
                 setTimeout(() => {
@@ -236,7 +251,7 @@ async function captureScreenshot(url) {
                 }, BLOCKED_TTL);
             }
             
-            throw error;
+            throw enhancedError;
         }
 }
 
@@ -284,9 +299,30 @@ app.post('/capture', async (req, res) => {
         
     } catch (error) {
         console.error('❌ Capture error:', error.message);
-        res.status(500).json({
-            error: 'Failed to capture screenshot',
-            message: error.message
+        
+        // Return appropriate HTTP status codes
+        let statusCode = 500;
+        let errorMessage = error.message;
+        
+        if (error.isTimeout) {
+            statusCode = 504; // Gateway Timeout - more appropriate for timeout errors
+            errorMessage = `Page load timeout: The requested page took too long to load. This may happen with slow sites, sites that block automated access, or pages requiring authentication.`;
+        } else if (error.message.includes('403') || error.message.includes('blocked')) {
+            statusCode = 403; // Forbidden
+            errorMessage = `Access denied: This site blocks automated access. Try accessing the page manually first.`;
+        } else if (error.message.includes('404')) {
+            statusCode = 404; // Not Found
+            errorMessage = `Page not found: The requested URL does not exist or is no longer available.`;
+        } else if (error.message.includes('net::ERR_NAME_NOT_RESOLVED')) {
+            statusCode = 404;
+            errorMessage = `Domain not found: The requested domain name could not be resolved.`;
+        }
+        
+        res.status(statusCode).json({
+            error: error.isTimeout ? 'Page load timeout' : 'Failed to capture screenshot',
+            message: errorMessage,
+            url: url,
+            retryAfter: error.isTimeout ? '30s' : undefined
         });
     }
 });

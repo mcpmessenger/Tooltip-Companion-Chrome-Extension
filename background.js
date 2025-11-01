@@ -206,7 +206,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         };
         
         // Get backend URL from storage
-        chrome.storage.sync.get({ backendUrl: 'http://18.232.131.174:3000' }, (storageItems) => {
+        chrome.storage.sync.get({ backendUrl: 'http://34.207.229.197:3000' }, (storageItems) => {
             if (chrome.runtime.lastError) {
                 console.error('❌ Storage error:', chrome.runtime.lastError);
                 sendResponseAsync({ 
@@ -216,7 +216,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 return;
             }
             
-            const backendUrl = storageItems.backendUrl || 'http://18.232.131.174:3000';
+            const backendUrl = storageItems.backendUrl || 'http://34.207.229.197:3000';
             
             fetch(`${backendUrl}/capture`, {
                 method: 'POST',
@@ -228,16 +228,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             .then(async res => {
                 console.log('📸 Backend response status:', res.status);
                 if (!res.ok) {
-                    let errorDetails = `HTTP error! status: ${res.status}`;
+                    let errorDetails = `HTTP ${res.status}`;
+                    let errorMessage = '';
+                    
                     try {
-                        const errorText = await res.text();
-                        if (errorText) {
-                            errorDetails += ` - ${errorText.substring(0, 200)}`;
+                        const errorJson = await res.json();
+                        if (errorJson.message) {
+                            errorMessage = errorJson.message;
+                            errorDetails = `HTTP ${res.status}: ${errorMessage}`;
+                        } else if (errorJson.error) {
+                            errorMessage = errorJson.error;
+                            errorDetails = `HTTP ${res.status}: ${errorMessage}`;
                         }
                     } catch (e) {
-                        // If can't read error body, just use status
+                        // If JSON parsing fails, try text
+                        try {
+                            const errorText = await res.text();
+                            if (errorText) {
+                                errorMessage = errorText.substring(0, 200);
+                                errorDetails = `HTTP ${res.status}: ${errorMessage}`;
+                            }
+                        } catch (e2) {
+                            // If can't read error body, just use status
+                        }
                     }
-                    throw new Error(errorDetails);
+                    
+                    const error = new Error(errorDetails);
+                    error.statusCode = res.status;
+                    error.message = errorMessage || errorDetails;
+                    throw error;
                 }
                 return res.json();
             })
@@ -249,7 +268,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 console.error('❌ Screenshot fetch error:', error);
                 sendResponseAsync({ 
                     success: false, 
-                    error: error.message,
+                    error: error.message || error.toString(),
+                    statusCode: error.statusCode || 500,
                     backendUrl: backendUrl
                 });
             });
@@ -276,7 +296,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         };
         
         // Get backend URL from storage
-        chrome.storage.sync.get({ backendUrl: 'http://18.232.131.174:3000' }, (storageItems) => {
+        chrome.storage.sync.get({ backendUrl: 'http://34.207.229.197:3000' }, (storageItems) => {
             if (chrome.runtime.lastError) {
                 console.error('❌ Storage error:', chrome.runtime.lastError);
                 sendResponseAsync({ 
@@ -286,7 +306,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 return;
             }
             
-            const backendUrl = storageItems.backendUrl || 'http://18.232.131.174:3000';
+            const backendUrl = storageItems.backendUrl || 'http://34.207.229.197:3000';
             
             fetch(`${backendUrl}/ocr-upload`, {
                 method: 'POST',

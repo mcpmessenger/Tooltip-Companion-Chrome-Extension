@@ -514,20 +514,34 @@
                 
                 console.error(`❌ Failed to fetch screenshot for ${url}:`, error);
                 
-                // Provide helpful error messages based on error type
+                // Provide helpful error messages based on error type and HTTP status
                 let errorMessage = error.message;
-                if (error.message.includes('500')) {
-                    errorMessage += ' (Backend server error - check backend logs)';
+                const isTimeout = error.message.includes('504') || 
+                                 error.message.includes('timeout') || 
+                                 error.message.includes('Timeout') ||
+                                 error.message.includes('Page load timeout');
+                const is403 = error.message.includes('403') || error.message.includes('blocked');
+                const is404 = error.message.includes('404') || error.message.includes('not found');
+                const is500 = error.message.includes('500') || error.message.includes('Internal Server');
+                const isFailedFetch = error.message.includes('Failed to fetch');
+                
+                if (isTimeout) {
+                    errorMessage = '⏱️ Page load timeout: This page took too long to load. The site may be slow, blocking automated access, or require authentication.';
+                } else if (is403) {
+                    errorMessage = '🚫 Access denied: This site blocks automated access. Try visiting the page manually in your browser first.';
+                } else if (is404) {
+                    errorMessage = '❌ Page not found: The requested URL does not exist or is no longer available.';
+                } else if (is500) {
+                    errorMessage = '🔧 Backend server error: There was a problem processing this request. Please try again later.';
                 } else if (error.message.includes('484')) {
-                    errorMessage += ' (Invalid backend response - check backend URL in settings)';
-                } else if (error.message.includes('timeout') || error.message.includes('Timeout')) {
-                    errorMessage += ' (Site took too long to load)';
-                } else if (error.message.includes('Failed to fetch')) {
-                    errorMessage += ' (Backend may be unreachable)';
+                    errorMessage = '⚠️ Invalid backend response: Check your backend URL in extension settings.';
+                } else if (isFailedFetch) {
+                    errorMessage = '🌐 Network error: Backend may be unreachable. Check your internet connection and backend URL settings.';
                 }
                 
                 console.error(`❌ Error details:`, {
                     message: errorMessage,
+                    originalError: error.message,
                     backendUrl: BACKEND_SERVICE_URL,
                     url: url,
                     retryCount: retryCount,
@@ -541,14 +555,10 @@
                     throw error; // Stop retrying, user needs to reload page
                 }
                 
-                // Retry logic for certain types of errors
-                if (retryCount < maxRetries && (
-                    error.message.includes('timeout') || 
-                    error.message.includes('Timeout') ||
-                    error.message.includes('500') ||
-                    error.message.includes('Failed to fetch')
-                )) {
-                    console.log(`🔄 Retrying in ${retryDelay}ms... (${retryCount + 1}/${maxRetries})`);
+                // Don't retry for 403 (blocked) or 404 (not found) - these won't succeed on retry
+                // Only retry for timeout, 500 errors, or network failures
+                if (retryCount < maxRetries && !is403 && !is404 && (isTimeout || is500 || isFailedFetch)) {
+                    console.log(`🔄 Retrying in ${retryDelay / 1000}s... (attempt ${retryCount + 2}/${maxRetries + 1})`);
                     await new Promise(resolve => setTimeout(resolve, retryDelay));
                     return fetchScreenshot(url, retryCount + 1);
                 }
