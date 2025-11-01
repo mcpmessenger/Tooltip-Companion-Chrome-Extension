@@ -79,8 +79,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log('🔹 Tooltip history items:', request.tooltipHistory ? request.tooltipHistory.length : 0);
         
         // Get backend URL from storage (defaults to AWS backend, allows localhost override)
-        chrome.storage.sync.get({ backendUrl: 'http://18.232.131.174:3000' }, (storageItems) => {
-            const backendUrl = storageItems.backendUrl || 'http://18.232.131.174:3000';
+        chrome.storage.sync.get({ backendUrl: 'http://54.211.114.152:3000' }, (storageItems) => {
+            const backendUrl = storageItems.backendUrl || 'http://54.211.114.152:3000';
             
             fetch(`${backendUrl}/chat`, {
             method: 'POST',
@@ -122,8 +122,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log('🎤 Forwarding transcription to backend...');
         
         // Get backend URL from storage
-        chrome.storage.sync.get({ backendUrl: 'http://18.232.131.174:3000' }, (storageItems) => {
-            const backendUrl = storageItems.backendUrl || 'http://18.232.131.174:3000';
+        chrome.storage.sync.get({ backendUrl: 'http://54.211.114.152:3000' }, (storageItems) => {
+            const backendUrl = storageItems.backendUrl || 'http://54.211.114.152:3000';
             
             fetch(`${backendUrl}/transcribe`, {
             method: 'POST',
@@ -225,10 +225,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 },
                 body: JSON.stringify({ url: request.url })
             })
-            .then(res => {
+            .then(async res => {
                 console.log('📸 Backend response status:', res.status);
                 if (!res.ok) {
-                    throw new Error(`HTTP error! status: ${res.status}`);
+                    let errorDetails = `HTTP error! status: ${res.status}`;
+                    try {
+                        const errorText = await res.text();
+                        if (errorText) {
+                            errorDetails += ` - ${errorText.substring(0, 200)}`;
+                        }
+                    } catch (e) {
+                        // If can't read error body, just use status
+                    }
+                    throw new Error(errorDetails);
                 }
                 return res.json();
             })

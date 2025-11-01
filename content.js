@@ -493,7 +493,9 @@
                 // Provide helpful error messages based on error type
                 let errorMessage = error.message;
                 if (error.message.includes('500')) {
-                    errorMessage += ' (Site may be slow, blocked, or require authentication)';
+                    errorMessage += ' (Backend server error - check backend logs)';
+                } else if (error.message.includes('484')) {
+                    errorMessage += ' (Invalid backend response - check backend URL in settings)';
                 } else if (error.message.includes('timeout') || error.message.includes('Timeout')) {
                     errorMessage += ' (Site took too long to load)';
                 } else if (error.message.includes('Failed to fetch')) {
