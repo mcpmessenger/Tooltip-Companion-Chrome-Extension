@@ -346,22 +346,51 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 },
                 body: JSON.stringify({ image: request.image })
             })
-            .then(res => {
+            .then(async res => {
                 console.log('📝 OCR upload response status:', res.status);
                 if (!res.ok) {
-                    throw new Error(`HTTP error! status: ${res.status}`);
+                    let errorDetails = `HTTP ${res.status}`;
+                    let errorMessage = '';
+                    
+                    try {
+                        const errorJson = await res.json();
+                        if (errorJson.message) {
+                            errorMessage = errorJson.message;
+                            errorDetails = `HTTP ${res.status}: ${errorMessage}`;
+                        } else if (errorJson.error) {
+                            errorMessage = errorJson.error;
+                            errorDetails = `HTTP ${res.status}: ${errorMessage}`;
+                        }
+                    } catch (e) {
+                        // If JSON parsing fails, try text
+                        try {
+                            const errorText = await res.text();
+                            if (errorText) {
+                                errorMessage = errorText.substring(0, 200);
+                                errorDetails = `HTTP ${res.status}: ${errorMessage}`;
+                            }
+                        } catch (e2) {
+                            // If can't read error body, just use status
+                        }
+                    }
+                    
+                    const error = new Error(errorDetails);
+                    error.statusCode = res.status;
+                    error.message = errorMessage || errorDetails;
+                    throw error;
                 }
                 return res.json();
             })
             .then(data => {
                 console.log('✅ OCR result received from backend');
-                sendResponseAsync({ success: true, data: data });
+                sendResponseAsync({ success: true, text: data.text, characterCount: data.characterCount, data: data });
             })
             .catch(error => {
                 console.error('❌ OCR upload error:', error);
                 sendResponseAsync({ 
                     success: false, 
-                    error: error.message,
+                    error: error.message || 'OCR processing failed',
+                    statusCode: error.statusCode || 500
                     backendUrl: backendUrl
                 });
             });
