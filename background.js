@@ -79,8 +79,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log('🔹 Tooltip history items:', request.tooltipHistory ? request.tooltipHistory.length : 0);
         
         // Get backend URL from storage (defaults to AWS backend, allows localhost override)
-        chrome.storage.sync.get({ backendUrl: 'http://34.207.229.197:3000' }, (storageItems) => {
-            const backendUrl = storageItems.backendUrl || 'http://34.207.229.197:3000';
+        chrome.storage.sync.get({ backendUrl: 'http://34.238.160.197:3000' }, (storageItems) => {
+            const backendUrl = storageItems.backendUrl || 'http://34.238.160.197:3000';
             
             fetch(`${backendUrl}/chat`, {
             method: 'POST',
@@ -153,8 +153,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log('🎤 Forwarding transcription to backend...');
         
         // Get backend URL from storage
-        chrome.storage.sync.get({ backendUrl: 'http://34.207.229.197:3000' }, (storageItems) => {
-            const backendUrl = storageItems.backendUrl || 'http://34.207.229.197:3000';
+        chrome.storage.sync.get({ backendUrl: 'http://34.238.160.197:3000' }, (storageItems) => {
+            const backendUrl = storageItems.backendUrl || 'http://34.238.160.197:3000';
             
             fetch(`${backendUrl}/transcribe`, {
             method: 'POST',

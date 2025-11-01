@@ -4,7 +4,7 @@
 
 **Public IP Address (Direct Access):**
 ```
-http://34.207.229.197:3000
+http://34.238.160.197:3000
 ```
 
 **⚠️ Note:** IP addresses may change when tasks restart. Use a Load Balancer for a stable endpoint.
