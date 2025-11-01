@@ -90,16 +90,37 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             body: JSON.stringify({
                 message: request.message,
                 url: request.url,
+                currentUrl: request.currentUrl || request.url, // Backend expects currentUrl or url
                 consoleLogs: request.consoleLogs,
                 pageInfo: request.pageInfo,
                 tooltipHistory: request.tooltipHistory,
                 openaiKey: request.openaiKey
             })
         })
-        .then(res => {
+        .then(async res => {
             console.log('🔹 Fetch response status:', res.status);
             if (!res.ok) {
-                throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                let errorDetails = `HTTP ${res.status}`;
+                let errorMessage = '';
+                
+                try {
+                    const errorJson = await res.json();
+                    if (errorJson.message) {
+                        errorMessage = errorJson.message;
+                        errorDetails = `HTTP ${res.status}: ${errorMessage}`;
+                    } else if (errorJson.error) {
+                        errorMessage = errorJson.error;
+                        errorDetails = `HTTP ${res.status}: ${errorMessage}`;
+                    }
+                } catch (e) {
+                    // If JSON parsing fails, use status text
+                    errorMessage = res.statusText || errorDetails;
+                }
+                
+                const error = new Error(errorDetails);
+                error.statusCode = res.status;
+                error.message = errorMessage || errorDetails;
+                throw error;
             }
             return res.json();
         })
@@ -112,7 +133,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         .catch(error => {
             console.error('❌ Chat error:', error);
             console.error('Error stack:', error.stack);
-            sendResponse({ reply: `Error: ${error.message}. Backend may be down or CORS issue.` });
+            
+            let errorMessage = error.message || 'Unknown error';
+            if (error.statusCode === 500) {
+                errorMessage = 'Backend server error. Please try again later.';
+            } else if (error.statusCode === 400) {
+                errorMessage = 'Invalid request. Please check your message.';
+            } else if (error.message.includes('Failed to fetch')) {
+                errorMessage = 'Cannot connect to backend. Check your backend URL in settings.';
+            }
+            
+            sendResponse({ reply: `Error: ${errorMessage}` });
         });
     });
         

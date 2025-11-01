@@ -384,16 +384,6 @@ app.post('/chat', async (req, res) => {
         console.log(`🔑 OpenAI key provided: ${openaiKey ? 'YES' : 'NO'}`);
         console.log(`🌐 Current URL: ${actualUrl || 'none'}`);
         
-        // Check if OpenAI key is provided
-        if (!openaiKey || !openaiKey.trim()) {
-            console.log('⚠️ No OpenAI key - returning setup message');
-            return res.json({ 
-                response: 'OpenAI API key not configured! To enable intelligent chat: 1. Click the extension icon → Options 2. Enter your OpenAI API key 3. Click "Save Settings" 4. Try chatting again! Get your key at: https://platform.openai.com/api-keys',
-                timestamp: new Date().toISOString(),
-                context: actualUrl ? pageAnalysisCache.get(actualUrl) : null
-            });
-        }
-        
         // Get context from current page if available
         let contextInfo = '';
         if (actualUrl) {
@@ -403,7 +393,62 @@ app.post('/chat', async (req, res) => {
             }
         }
         
-        // Generate a more helpful response
+        // Check if OpenAI key is provided - if so, use OpenAI API
+        if (openaiKey && openaiKey.trim()) {
+            try {
+                console.log('🤖 Using OpenAI API for chat response...');
+                
+                // Prepare messages for OpenAI
+                const messages = [
+                    {
+                        role: 'system',
+                        content: `You are a helpful assistant for the Tooltip Companion browser extension. You help users understand web pages by analyzing screenshots and providing context-aware assistance.${contextInfo ? `\n\nUser is currently on a page with this context:${contextInfo}` : ''}`
+                    },
+                    {
+                        role: 'user',
+                        content: message
+                    }
+                ];
+                
+                // Call OpenAI API
+                const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${openaiKey.trim()}`
+                    },
+                    body: JSON.stringify({
+                        model: 'gpt-3.5-turbo',
+                        messages: messages,
+                        max_tokens: 500,
+                        temperature: 0.7
+                    })
+                });
+                
+                if (!openaiResponse.ok) {
+                    const errorData = await openaiResponse.json().catch(() => ({}));
+                    throw new Error(errorData.error?.message || `OpenAI API error: ${openaiResponse.status}`);
+                }
+                
+                const openaiData = await openaiResponse.json();
+                const aiResponse = openaiData.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
+                
+                console.log('✅ OpenAI response received');
+                
+                return res.json({ 
+                    response: aiResponse,
+                    timestamp: new Date().toISOString(),
+                    context: actualUrl ? pageAnalysisCache.get(actualUrl) : null,
+                    source: 'openai'
+                });
+            } catch (error) {
+                console.error('❌ OpenAI API error:', error.message);
+                // Fall through to basic response if OpenAI fails
+                console.log('⚠️ Falling back to basic response');
+            }
+        }
+        
+        // Generate a basic helpful response (fallback when no OpenAI key or API fails)
         let response;
         const lowerMessage = message.toLowerCase();
         
@@ -420,8 +465,10 @@ app.post('/chat', async (req, res) => {
             response = `The smart tooltip system now includes:\n• OCR text extraction from screenshots\n• Intelligent page type detection\n• Proactive suggestions based on content\n• Context-aware chat responses${contextInfo}`;
         } else if (lowerMessage.includes('help')) {
             response = `I can help you with:\n• 🔍 Page analysis (OCR + AI insights)\n• 📸 Smart tooltips with context\n• 🧠 Proactive suggestions\n• 💬 Context-aware chat\n\nTry: "analyze this page" or "what type of page is this?"${contextInfo}`;
+        } else if (!openaiKey || !openaiKey.trim()) {
+            response = `I received your message: "${message}". To enable intelligent AI-powered responses, please add your OpenAI API key in extension settings (Options). For now, I can help with basic page analysis.${contextInfo}`;
         } else {
-            response = `I received your message: "${message}". I'm now equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.${contextInfo}`;
+            response = `I received your message: "${message}". I'm equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.${contextInfo}`;
         }
         
         res.json({ 
@@ -451,12 +498,40 @@ app.post('/chat', async (req, res) => {
       try {
           const { image } = req.body;
           if (!image) {
-              return res.status(400).json({ error: "Image data is required" });
+              return res.status(400).json({ 
+                  error: "Image data is required",
+                  message: "Please provide an image in base64 format: { \"image\": \"data:image/png;base64,...\" }"
+              });
           }
-          res.json({ text: "OCR processing not implemented yet", success: true });
+          
+          console.log("🔍 Processing OCR on uploaded image...");
+          
+          // Extract base64 data from data URL if present
+          let base64Data = image;
+          if (image.startsWith('data:image/')) {
+              const commaIndex = image.indexOf(',');
+              base64Data = image.substring(commaIndex + 1);
+          }
+          
+          // Convert base64 to buffer
+          const imageBuffer = Buffer.from(base64Data, 'base64');
+          
+          // Extract text using OCR
+          const extractedText = await extractTextFromScreenshot(imageBuffer);
+          
+          console.log(`✅ OCR completed. Extracted ${extractedText.length} characters`);
+          
+          res.json({ 
+              text: extractedText,
+              success: true,
+              characterCount: extractedText.length
+          });
       } catch (error) {
           console.error("❌ OCR Upload error:", error);
-          res.status(500).json({ error: "OCR processing failed" });
+          res.status(500).json({ 
+              error: "OCR processing failed",
+              message: error.message
+          });
       }
   });
 
