@@ -57,7 +57,7 @@
     
     // Default to cloud backend for production, fallback to localhost for development
     // Update DEFAULT_BACKEND after deploying to cloud (Railway, Render, etc.)
-    const DEFAULT_BACKEND = 'http://18.232.131.174:3000'; // AWS ECS Backend
+    const DEFAULT_BACKEND = 'http://34.207.229.197:3000'; // AWS ECS Backend (updated 2025-11-01)
     const DEV_BACKEND = 'http://localhost:3000';
     
     chrome.storage.sync.get({ backendUrl: DEFAULT_BACKEND }, (items) => {
@@ -390,11 +390,26 @@
             return cacheEntry && (Date.now() - cacheEntry.timestamp) < CACHE_TTL;
         }
         
+        // Helper function to check if extension context is valid
+        function isExtensionContextValid() {
+            try {
+                return !!(chrome.runtime && chrome.runtime.id);
+            } catch (e) {
+                return false;
+            }
+        }
+
         // Fetch screenshot from backend with retry mechanism
         // Uses background script proxy to avoid Mixed Content issues on HTTPS pages
         async function fetchScreenshot(url, retryCount = 0) {
             const maxRetries = 2;
             const retryDelay = Math.pow(2, retryCount) * 1000; // Exponential backoff: 1s, 2s, 4s
+            
+            // Check extension context before attempting fetch
+            if (!isExtensionContextValid()) {
+                console.log(`ℹ️ Extension was reloaded. Please reload this page to enable tooltips.`);
+                throw new Error('Extension context invalidated. Please reload this page.');
+            }
             
             try {
                 console.log(`📸 Fetching screenshot for: ${url}${retryCount > 0 ? ` (attempt ${retryCount + 1})` : ''}`);
@@ -402,8 +417,8 @@
                 
                 // Use background script to proxy the request (bypasses Mixed Content restrictions)
                 const response = await new Promise((resolve, reject) => {
-                    // Check if extension context is still valid
-                    if (!chrome.runtime?.id) {
+                    // Double-check extension context is still valid
+                    if (!isExtensionContextValid()) {
                         reject(new Error('Extension context invalidated. Please reload this page.'));
                         return;
                     }
