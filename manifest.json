@@ -39,7 +39,5 @@
       "resources": ["icons/icon128.svg", "icons/glippy.png"],
       "matches": ["<all_urls>"]
     }
-  ],
-  "homepage_url": "https://tooltipcompanion.com",
-  "privacy_policy": "https://tooltipcompanion.com/privacy"
+  ]
 }
