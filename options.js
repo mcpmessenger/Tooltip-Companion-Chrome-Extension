@@ -1,4 +1,4 @@
-const defaultUrl = 'http://localhost:3000';
+const defaultUrl = 'http://34.238.160.197:3000'; // AWS ECS Backend (updated 2025-11-01)
 
 function saveOptions() {
   const url = document.getElementById('backendUrl').value;
