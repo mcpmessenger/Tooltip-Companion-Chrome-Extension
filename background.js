@@ -390,7 +390,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponseAsync({ 
                     success: false, 
                     error: error.message || 'OCR processing failed',
-                    statusCode: error.statusCode || 500
+                    statusCode: error.statusCode || 500,
                     backendUrl: backendUrl
                 });
             });
