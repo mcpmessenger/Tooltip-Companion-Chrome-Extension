@@ -488,6 +488,15 @@
                 return blobUrl;
                 
             } catch (error) {
+                // Handle extension context invalidation gracefully (don't log as error)
+                if (error.message.includes('Extension context invalidated') || 
+                    error.message.includes('Extension was reloaded') ||
+                    error.message.includes('message port closed')) {
+                    console.log(`ℹ️ Extension was reloaded. Reload this page to enable tooltips.`);
+                    // Don't retry - user needs to reload page
+                    throw error;
+                }
+                
                 console.error(`❌ Failed to fetch screenshot for ${url}:`, error);
                 
                 // Provide helpful error messages based on error type
@@ -509,6 +518,13 @@
                     retryCount: retryCount,
                     note: 'Request proxied through background script to avoid Mixed Content'
                 });
+                
+                // Don't retry if extension context is invalidated
+                if (error.message.includes('Extension context invalidated') || 
+                    error.message.includes('Extension was reloaded') ||
+                    error.message.includes('message port closed')) {
+                    throw error; // Stop retrying, user needs to reload page
+                }
                 
                 // Retry logic for certain types of errors
                 if (retryCount < maxRetries && (
