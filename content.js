@@ -2222,23 +2222,9 @@
                 description: document.querySelector('meta[name="description"]')?.content
             };
             
-            // Get API key from storage
+            // Get API key from storage (optional - backend has default key)
             chrome.storage.sync.get({ openaiKey: '' }, (items) => {
-                console.log('🔑 API Key from storage:', items.openaiKey ? 'Set' : 'Not set');
-                
-                // Check if API key is missing and show clear error
-                if (!items.openaiKey || items.openaiKey.trim() === '') {
-                    addMessage('❌ OpenAI API key not configured!\n\n' +
-                              'To enable chat:\n' +
-                              'Option 1: Type in chat\n' +
-                              '   "My OpenAI API key is sk-proj-..."\n\n' +
-                              'Option 2: Use Options page\n' +
-                              '   1. Click the extension icon → Options\n' +
-                              '   2. Enter your OpenAI API key\n' +
-                              '   3. Click "Save Settings"\n\n' +
-                              'Get your key at: https://platform.openai.com/api-keys', 'bot');
-                    return;
-                }
+                console.log('🔑 API Key from storage:', items.openaiKey ? 'Set (will use user key)' : 'Not set (will use backend default)');
                 
                 // Check if extension context is still valid
                 if (!chrome.runtime?.id) {
@@ -2246,6 +2232,7 @@
                     return;
                 }
                 
+                // Send chat message (backend will use default key if user key not provided)
                 chrome.runtime.sendMessage({
                     action: 'chat',
                     message: message,
@@ -2253,7 +2240,7 @@
                     consoleLogs: consoleLogs.slice(-10), // Last 10 console entries
                     pageInfo: pageInfo,
                     tooltipHistory: window.tooltipHistory || [], // Recent tooltip events for context
-                    openaiKey: items.openaiKey || ''
+                    openaiKey: items.openaiKey || '' // Optional - backend has default
                 }, (response) => {
                     console.log('📨 Chat response received:', response);
                     
@@ -2270,22 +2257,10 @@
                     }
                     
                     if (response && response.reply) {
-                        // Check if backend returned API key error
-                        if (response.reply.includes('⚠️ OpenAI API key not configured')) {
-                            addMessage('❌ OpenAI API key not configured!\n\n' +
-                                      'To enable chat:\n' +
-                                      '1. Click the extension icon → Options\n' +
-                                      '2. Enter your OpenAI API key\n' +
-                                      '3. Click "Save Settings"\n' +
-                                      '4. Try chatting again!\n\n' +
-                                      'Get your key at: https://platform.openai.com/api-keys', 'bot');
-                        } else {
-                            addMessage(response.reply, 'bot');
-                        }
+                        addMessage(response.reply, 'bot');
                     } else {
                         console.error('❌ No response from backend');
-                        console.error('❌ Backend URL should be: http://localhost:3000');
-                        addMessage('❌ Backend service unavailable.\n\nMake sure backend is running:\n1. Open terminal\n2. cd playwright_service\n3. node server.js\n\nThen reload this page.', 'bot');
+                        addMessage('❌ Backend service unavailable. Please check your backend URL in extension settings.', 'bot');
                     }
                 });
             });
