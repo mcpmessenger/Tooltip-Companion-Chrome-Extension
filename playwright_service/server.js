@@ -381,7 +381,8 @@ app.post('/chat', async (req, res) => {
         }
         
         console.log(`💬 Chat message: ${message}`);
-        console.log(`🔑 OpenAI key provided: ${openaiKey ? 'YES' : 'NO'}`);
+        console.log(`🔑 OpenAI key from request: ${openaiKey ? 'YES' : 'NO'}`);
+        console.log(`🔑 OpenAI key from env: ${process.env.OPENAI_API_KEY ? 'YES' : 'NO'}`);
         console.log(`🌐 Current URL: ${actualUrl || 'none'}`);
         
         // Get context from current page if available
@@ -393,10 +394,14 @@ app.post('/chat', async (req, res) => {
             }
         }
         
-        // Check if OpenAI key is provided - if so, use OpenAI API
-        if (openaiKey && openaiKey.trim()) {
+        // Use OpenAI key from request if provided, otherwise use backend's default key
+        const apiKeyToUse = (openaiKey && openaiKey.trim()) ? openaiKey.trim() : (process.env.OPENAI_API_KEY || '');
+        
+        // Check if we have an OpenAI key to use (from request or environment)
+        if (apiKeyToUse) {
             try {
-                console.log('🤖 Using OpenAI API for chat response...');
+                const keySource = (openaiKey && openaiKey.trim()) ? 'user-provided' : 'backend-default';
+                console.log(`🤖 Using OpenAI API for chat response (key from: ${keySource})...`);
                 
                 // Prepare messages for OpenAI
                 const messages = [
@@ -415,7 +420,7 @@ app.post('/chat', async (req, res) => {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${openaiKey.trim()}`
+                        'Authorization': `Bearer ${apiKeyToUse}`
                     },
                     body: JSON.stringify({
                         model: 'gpt-3.5-turbo',
@@ -465,9 +470,8 @@ app.post('/chat', async (req, res) => {
             response = `The smart tooltip system now includes:\n• OCR text extraction from screenshots\n• Intelligent page type detection\n• Proactive suggestions based on content\n• Context-aware chat responses${contextInfo}`;
         } else if (lowerMessage.includes('help')) {
             response = `I can help you with:\n• 🔍 Page analysis (OCR + AI insights)\n• 📸 Smart tooltips with context\n• 🧠 Proactive suggestions\n• 💬 Context-aware chat\n\nTry: "analyze this page" or "what type of page is this?"${contextInfo}`;
-        } else if (!openaiKey || !openaiKey.trim()) {
-            response = `I received your message: "${message}". To enable intelligent AI-powered responses, please add your OpenAI API key in extension settings (Options). For now, I can help with basic page analysis.${contextInfo}`;
         } else {
+            // Fallback response when OpenAI is not available
             response = `I received your message: "${message}". I'm equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.${contextInfo}`;
         }
         

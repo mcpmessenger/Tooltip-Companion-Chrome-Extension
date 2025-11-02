@@ -2092,7 +2092,8 @@
                 }
                 
                 // Otherwise, try the LLM parser
-                addMessage('🔑 Detected API key setting intent. Extracting key from your message...', 'bot');
+                addMessage('🔑 Detected API key setting intent. Extracting key from your message...\n\n' +
+                          'Note: Chat works without a key (uses backend default). Setting your own key is optional.', 'bot');
                 
                 // Check if extension context is still valid
                 if (!chrome.runtime?.id) {
