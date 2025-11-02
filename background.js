@@ -66,10 +66,10 @@ async function initMCPClient(backendUrl) {
 
 // Get protocol preference from storage
 function getProtocolPreference(callback) {
-    chrome.storage.sync.get({ useMCP: false, backendUrl: 'http://34.238.170.86:3000' }, (items) => {
-        const backendUrl = items.backendUrl || 'http://34.238.170.86:3000';
+    chrome.storage.sync.get({ useMCP: false, backendUrl: 'http://3.84.194.78:3000' }, (items) => {
+        const backendUrl = items.backendUrl || 'http://3.84.194.78:3000';
         // Ensure backend URL is properly formatted
-        const normalizedUrl = backendUrl.trim().replace(/\/+$/, '') || 'http://34.238.170.86:3000';
+        const normalizedUrl = backendUrl.trim().replace(/\/+$/, '') || 'http://3.84.194.78:3000';
         callback(items.useMCP || false, normalizedUrl);
     });
 }
@@ -437,8 +437,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log('🎤 Forwarding transcription to backend...');
         
         // Get backend URL from storage
-        chrome.storage.sync.get({ backendUrl: 'http://34.238.170.86:3000' }, (storageItems) => {
-            const backendUrl = storageItems.backendUrl || 'http://34.238.170.86:3000';
+        chrome.storage.sync.get({ backendUrl: 'http://3.84.194.78:3000' }, (storageItems) => {
+            const backendUrl = storageItems.backendUrl || 'http://3.84.194.78:3000';
             const normalizedUrl = normalizeBackendUrl(backendUrl);
             
             fetch(`${normalizedUrl}/transcribe`, {
