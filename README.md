@@ -5,9 +5,9 @@
   
   AI-powered browser extension that displays live screenshot previews when hovering over hyperlinks, with context-aware assistance.
   
-  **Chrome Web Store Ready - v1.4.0**
+  **Chrome Web Store Ready - v1.4.1**
   
-  ![Version](https://img.shields.io/badge/version-1.4.0-blue)
+  ![Version](https://img.shields.io/badge/version-1.4.1-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
   ![Platform](https://img.shields.io/badge/platform-Chrome%20%7C%20Edge-lightgrey)
   
@@ -30,6 +30,11 @@
 - **Visual Understanding**: AI sees what's actually visible, not just HTML metadata
 - **Screenshot Analysis**: Upload screenshots for AI to analyze
 - **Voice Input**: Speak to AI assistant using browser speech recognition
+
+### 🔌 Protocol Support
+- **Model Context Protocol (MCP)**: Standard JSON-RPC 2.0 protocol for AI context sharing
+- **REST API Fallback**: Automatic fallback to REST if MCP is unavailable
+- **Hybrid Architecture**: Best of both worlds - modern protocol with reliable fallback
 
 ## 🚀 Quick Start
 
@@ -56,20 +61,20 @@ The AI chat feature requires an OpenAI API key. Here's how to set it up:
 
 ## 🚀 Current Status
 
-**Version:** 1.4.0  
+**Version:** 1.4.1  
 **Status:** ✅ All Features Working
 
-### What's New in 1.4.0
-- ✨ **Context-Aware AI Chat** - AI now knows what you're hovering over!
-- 📝 **OCR-Powered Context** - Automatically extracts text from preview screenshots
-- 🔘 **Enhanced Button Tooltips** - See button purpose, shortcuts, and state
-- 📊 **Tooltip History** - Console-like visibility into what the AI sees
-- 🎯 **Simplified Setup** - Everything works out of the box
+### What's New in 1.4.1
+- 🔌 **Model Context Protocol (MCP) Support** - Standard protocol for AI context sharing
+- 🛡️ **Robust Error Handling** - Automatic fallback to REST API if MCP unavailable
+- 🔍 **Enhanced Debugging** - Comprehensive logging for troubleshooting
+- ⚡ **Improved Reliability** - Better connection handling and timeout management
 
 ### Production Backend
 - ✅ **Deployed and Running** - AWS ECS Fargate
 - ✅ **No Configuration** - Pre-configured to use production backend
 - ✅ **Always Free** - No backend setup needed for users
+- ✅ **MCP & REST** - Supports both protocols for maximum compatibility
 
 ---
 
@@ -103,23 +108,26 @@ AI: "Based on the tooltip preview, the offer shows a **$325 bonus** for new chec
 
 ```
 ├── manifest.json          # Extension configuration
-├── background.js          # Service worker
+├── background.js          # Service worker (MCP client, REST fallback)
 ├── content.js            # Content scripts (tooltips, chat widget)
 ├── options.html          # Settings page
 ├── options.js            # Settings logic
-├── icons/                # Extension icons (16px, 48px, 128px, glippy logo)
+├── mcp-client.js         # MCP client library (JSON-RPC 2.0)
+├── icons/                # Extension icons
 │   ├── glippy.png        # Main logo/branding
 │   ├── icon16.png
 │   ├── icon48.png
 │   └── icon128.png
 ├── playwright_service/   # Backend service (local development)
 │   ├── server.js         # Express server with Playwright & OCR
+│   ├── mcp-server.js     # MCP server implementation
 │   ├── package.json      # Backend dependencies
-│   └── start-backend.ps1 # Startup script
+│   └── Dockerfile        # Container configuration
 ├── docs/                 # Documentation
-├── privacy-policy.md     # Privacy policy
-├── BACKEND_SETUP.md      # Backend setup guide
-└── DEPLOYMENT_STRATEGY.md # Production deployment guide
+│   ├── MCP_USAGE_GUIDE.md
+│   ├── MCP_DEBUG_GUIDE.md
+│   └── BACKEND_SETUP.md
+└── privacy-policy.md     # Privacy policy
 ```
 
 ## 🛡️ Privacy
@@ -144,28 +152,41 @@ Want to run your own backend or contribute?
 2. Load extension in Chrome (`chrome://extensions/` → Developer mode → Load unpacked)
 3. **Option A**: Use production backend (default - no setup!)
 4. **Option B**: Run local backend:
-   ```powershell
+   ```bash
    cd playwright_service
    npm install
    npx playwright install chromium
    node server.js
    ```
 
-See [BACKEND_SETUP.md](BACKEND_SETUP.md) for detailed backend setup.
+See [docs/BACKEND_SETUP.md](docs/BACKEND_SETUP.md) for detailed backend setup.
 
-### Backend Endpoints (Local Development)
+### Backend Endpoints
 
+#### REST API (Fallback)
 - `POST /capture` - Screenshot generation
 - `POST /ocr-upload` - OCR text extraction
 - `POST /chat` - AI chat with context
 - `GET /health` - Health check
 
+#### Model Context Protocol (MCP)
+- `POST /mcp` - JSON-RPC 2.0 endpoint
+  - `initialize` - Protocol handshake
+  - `tools/call` - Call tools (capture_screenshot, chat, ocr_upload, analyze_page)
+  - `tools/list` - List available tools
+  - `resources/list` - List available resources
+
 ## 📚 Documentation
 
-- **[Tooltip Context-Aware Chat](TOOLTIP_CONTEXT_AWARE_CHAT.md)** - How the new AI context feature works ⭐
-- [Backend Setup Guide](BACKEND_SETUP.md) - Detailed backend installation
-- [Deployment Strategy](DEPLOYMENT_STRATEGY.md) - Production deployment options
-- [Privacy Policy](privacy-policy.md) - Data handling and privacy
+- **[MCP Usage Guide](docs/MCP_USAGE_GUIDE.md)** - How to use Model Context Protocol ⭐
+- **[MCP Debug Guide](docs/MCP_DEBUG_GUIDE.md)** - Troubleshooting MCP issues
+- **[Backend Setup](docs/BACKEND_SETUP.md)** - Detailed backend installation
+- **[MCP Implementation Plan](docs/MCP_IMPLEMENTATION_PLAN.md)** - Migration documentation
+- **[Privacy Policy](privacy-policy.md)** - Data handling and privacy
+
+## 🤝 Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## 🌟 Support
 
@@ -185,10 +206,12 @@ See [BACKEND_SETUP.md](BACKEND_SETUP.md) for detailed backend setup.
 - **Console-like AI** - The AI sees what you're exploring, just like a developer console
 - **Context-aware** - Natural conversations about what's on your screen
 - **Smart assistance** - AI understands your browsing context
+- **Standard Protocol** - Uses Model Context Protocol (MCP) for interoperability
 
 ### For Developers
 - **Production ready** - Fully deployed and stable
 - **Well documented** - Clear setup and development guides
+- **Modern architecture** - MCP support with REST fallback
 - **MIT licensed** - Free to use and modify
 
 ---
@@ -200,4 +223,3 @@ See [BACKEND_SETUP.md](BACKEND_SETUP.md) for detailed backend setup.
   
   ⭐ Star us on GitHub if you find this useful!
 </div>
-
