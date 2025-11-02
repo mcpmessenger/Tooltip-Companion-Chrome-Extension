@@ -5,6 +5,7 @@ const express = require('express');
 const { chromium } = require('playwright');
 const cors = require('cors');
 const Tesseract = require('tesseract.js');
+const MCPServer = require('./mcp-server');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -163,6 +164,37 @@ async function captureScreenshot(url) {
         });
         
         const page = await context.newPage();
+        
+        // Block unnecessary resources to improve performance and reduce bandwidth
+        // This dramatically reduces page load time by skipping images, fonts, media, and tracking scripts
+        await page.route('**/*', (route) => {
+            const request = route.request();
+            const url = request.url();
+            const resourceType = request.resourceType();
+            
+            // Block images
+            if (resourceType === 'image' || /\.(png|jpg|jpeg|webp|gif|svg|ico)(\?.*)?$/i.test(url)) {
+                return route.abort();
+            }
+            
+            // Block fonts
+            if (resourceType === 'font' || /\.(woff|woff2|ttf|otf|eot)(\?.*)?$/i.test(url)) {
+                return route.abort();
+            }
+            
+            // Block media
+            if (resourceType === 'media' || /\.(mp4|webm|ogg|mp3|wav)(\?.*)?$/i.test(url)) {
+                return route.abort();
+            }
+            
+            // Block common tracking and analytics scripts
+            if (/analytics\.js|gtm\.js|ga\.js|facebook\.net|doubleclick\.net|googletagmanager\.com/i.test(url)) {
+                return route.abort();
+            }
+            
+            // Allow everything else
+            route.continue();
+        });
         
         // Set default timeout for page operations
         page.setDefaultTimeout(25000); // 25 seconds for page operations
@@ -357,7 +389,7 @@ app.get('/analyze/:url', async (req, res) => {
     }
 });
 
-// Chat endpoint
+// Chat endpoint (REST - maintained for backward compatibility)
 app.post('/chat', async (req, res) => {
     console.log('🚨 CHAT ENDPOINT CALLED!');
     try {
@@ -367,8 +399,8 @@ app.post('/chat', async (req, res) => {
             method: req.method
         });
         
-        const { message, currentUrl, url, openaiKey } = req.body;
-        const actualUrl = currentUrl || url; // Handle both field names
+        const { message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs } = req.body;
+        const actualUrl = currentUrl || url;
         
         console.log('🔍 URL parsing:', { currentUrl, url, actualUrl });
         
@@ -381,110 +413,27 @@ app.post('/chat', async (req, res) => {
         }
         
         console.log(`💬 Chat message: ${message}`);
-        console.log(`🔑 OpenAI key from request: ${openaiKey ? 'YES' : 'NO'}`);
-        console.log(`🔑 OpenAI key from env: ${process.env.OPENAI_API_KEY ? 'YES' : 'NO'}`);
+        console.log(`🔑 OpenAI key from request: ${openaiKey ? `YES (${openaiKey.substring(0, 10)}...)` : 'NO'}`);
+        console.log(`🔑 OpenAI key from env: ${process.env.OPENAI_API_KEY ? `YES (${process.env.OPENAI_API_KEY.substring(0, 10)}...)` : 'NO - KEY NOT SET`}`);
         console.log(`🌐 Current URL: ${actualUrl || 'none'}`);
         
-        // Get context from current page if available
-        let contextInfo = '';
-        if (actualUrl) {
-            const analysis = pageAnalysisCache.get(actualUrl);
-            if (analysis) {
-                contextInfo = `\n\nCurrent page context:\n- Page type: ${analysis.pageType}\n- Key topics: ${analysis.keyTopics.join(', ') || 'none'}\n- Suggestions: ${analysis.suggestedActions.join('; ') || 'none'}`;
-            }
-        }
-        
-        // Use OpenAI key from request if provided, otherwise use backend's default key
-        const apiKeyToUse = (openaiKey && openaiKey.trim()) ? openaiKey.trim() : (process.env.OPENAI_API_KEY || '');
-        
-        // Check if we have an OpenAI key to use (from request or environment)
-        if (apiKeyToUse) {
-            try {
-                const keySource = (openaiKey && openaiKey.trim()) ? 'user-provided' : 'backend-default';
-                console.log(`🤖 Using OpenAI API for chat response (key from: ${keySource})...`);
-                
-                // Prepare messages for OpenAI
-                const messages = [
-                    {
-                        role: 'system',
-                        content: `You are a helpful assistant for the Tooltip Companion browser extension. You help users understand web pages by analyzing screenshots and providing context-aware assistance.${contextInfo ? `\n\nUser is currently on a page with this context:${contextInfo}` : ''}`
-                    },
-                    {
-                        role: 'user',
-                        content: message
-                    }
-                ];
-                
-                // Call OpenAI API
-                const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${apiKeyToUse}`
-                    },
-                    body: JSON.stringify({
-                        model: 'gpt-3.5-turbo',
-                        messages: messages,
-                        max_tokens: 500,
-                        temperature: 0.7
-                    })
-                });
-                
-                if (!openaiResponse.ok) {
-                    const errorData = await openaiResponse.json().catch(() => ({}));
-                    throw new Error(errorData.error?.message || `OpenAI API error: ${openaiResponse.status}`);
-                }
-                
-                const openaiData = await openaiResponse.json();
-                const aiResponse = openaiData.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
-                
-                console.log('✅ OpenAI response received');
-                
-                return res.json({ 
-                    response: aiResponse,
-                    timestamp: new Date().toISOString(),
-                    context: actualUrl ? pageAnalysisCache.get(actualUrl) : null,
-                    source: 'openai'
-                });
-            } catch (error) {
-                console.error('❌ OpenAI API error:', error.message);
-                // Fall through to basic response if OpenAI fails
-                console.log('⚠️ Falling back to basic response');
-            }
-        }
-        
-        // Generate a basic helpful response (fallback when no OpenAI key or API fails)
-        let response;
-        const lowerMessage = message.toLowerCase();
-        
-        if (lowerMessage.includes('hello') || lowerMessage.includes('hi') || lowerMessage.includes('hey')) {
-            response = `Hello! 👋 I'm your Smart Tooltip Companion. I can analyze web pages using OCR and provide intelligent insights about what you're viewing.${contextInfo}`;
-        } else if (lowerMessage.includes('analyze') || lowerMessage.includes('what is this page')) {
-            if (actualUrl && pageAnalysisCache.has(actualUrl)) {
-                const analysis = pageAnalysisCache.get(actualUrl);
-                response = `📊 Page Analysis for ${actualUrl}:\n• Type: ${analysis.pageType}\n• Confidence: ${Math.round(analysis.confidence * 100)}%\n• Key Topics: ${analysis.keyTopics.join(', ') || 'none'}\n• Suggestions: ${analysis.suggestedActions.join('; ') || 'none'}`;
-            } else {
-                response = `I can analyze pages! Hover over a link to capture a screenshot, then ask me to analyze it.`;
-            }
-        } else if (lowerMessage.includes('tooltip') || lowerMessage.includes('screenshot')) {
-            response = `The smart tooltip system now includes:\n• OCR text extraction from screenshots\n• Intelligent page type detection\n• Proactive suggestions based on content\n• Context-aware chat responses${contextInfo}`;
-        } else if (lowerMessage.includes('help')) {
-            response = `I can help you with:\n• 🔍 Page analysis (OCR + AI insights)\n• 📸 Smart tooltips with context\n• 🧠 Proactive suggestions\n• 💬 Context-aware chat\n\nTry: "analyze this page" or "what type of page is this?"${contextInfo}`;
+        // Log full key status for debugging (first few chars only)
+        if (process.env.OPENAI_API_KEY) {
+            console.log(`✅ Backend has OpenAI API key configured (length: ${process.env.OPENAI_API_KEY.length} chars)`);
         } else {
-            // Fallback response when OpenAI is not available
-            response = `I received your message: "${message}". I'm equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.${contextInfo}`;
+            console.log(`❌ WARNING: Backend OPENAI_API_KEY environment variable is NOT set!`);
+            console.log(`   To set it: export OPENAI_API_KEY=sk-... (or configure in ECS task definition)`);
         }
         
-        res.json({ 
-            response,
-            timestamp: new Date().toISOString(),
-            context: actualUrl ? pageAnalysisCache.get(actualUrl) : null
-        });
+        // Use shared chat processing function
+        const result = await processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs);
+        
+        res.json(result);
         
         console.log('✅ Chat response sent:', {
-            response: response.substring(0, 100) + '...',
-            timestamp: new Date().toISOString(),
-            hasContext: !!pageAnalysisCache.get(actualUrl)
+            response: result.response.substring(0, 100) + '...',
+            timestamp: result.timestamp,
+            hasContext: !!result.context
         });
         
     } catch (error) {
@@ -554,6 +503,11 @@ app.get('/health', (req, res) => {
             ocr: true,
             analysis: true,
             chat: true
+        },
+        config: {
+            openaiKeyConfigured: !!(process.env.OPENAI_API_KEY),
+            openaiKeyLength: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0,
+            openaiKeyPrefix: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.substring(0, 7) + '...' : 'not set'
         }
     });
 });
@@ -586,6 +540,221 @@ app.use((req, res) => {
     });
 });
 
+// Extract chat logic into reusable function
+async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs) {
+    const actualUrl = currentUrl || url;
+    
+    // Get context from current page if available
+    let contextInfo = '';
+    if (actualUrl) {
+        const analysis = pageAnalysisCache.get(actualUrl);
+        if (analysis) {
+            contextInfo = `\n\nCurrent page context:\n- Page type: ${analysis.pageType}\n- Key topics: ${analysis.keyTopics.join(', ') || 'none'}\n- Suggestions: ${analysis.suggestedActions.join('; ') || 'none'}`;
+        }
+    }
+    
+    // Use OpenAI key from request if provided, otherwise use backend's default key
+    const apiKeyToUse = (openaiKey && openaiKey.trim()) ? openaiKey.trim() : (process.env.OPENAI_API_KEY || '');
+    
+    console.log('🔑 API Key check:', {
+        userProvided: !!(openaiKey && openaiKey.trim()),
+        backendKey: !!(process.env.OPENAI_API_KEY),
+        keyToUse: apiKeyToUse ? `${apiKeyToUse.substring(0, 10)}...` : 'NONE'
+    });
+    
+    // Check if we have an OpenAI key to use
+    if (apiKeyToUse) {
+        console.log('🤖 Using OpenAI API for chat response');
+        try {
+            // Prepare messages for OpenAI
+            const messages = [
+                {
+                    role: 'system',
+                    content: `You are a helpful assistant for the Tooltip Companion browser extension. You help users understand web pages by analyzing screenshots and providing context-aware assistance.${contextInfo ? `\n\nUser is currently on a page with this context:${contextInfo}` : ''}`
+                },
+                {
+                    role: 'user',
+                    content: message
+                }
+            ];
+            
+            // Call OpenAI API
+            const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKeyToUse}`
+                },
+                body: JSON.stringify({
+                    model: 'gpt-3.5-turbo',
+                    messages: messages,
+                    max_tokens: 500,
+                    temperature: 0.7
+                })
+            });
+            
+            if (!openaiResponse.ok) {
+                const errorData = await openaiResponse.json().catch(() => ({}));
+                throw new Error(errorData.error?.message || `OpenAI API error: ${openaiResponse.status}`);
+            }
+            
+            const openaiData = await openaiResponse.json();
+            const aiResponse = openaiData.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
+            
+            return {
+                response: aiResponse,
+                timestamp: new Date().toISOString(),
+                context: actualUrl ? pageAnalysisCache.get(actualUrl) : null,
+                source: 'openai'
+            };
+        } catch (error) {
+            console.error('❌ OpenAI API error:', error.message);
+            console.error('❌ OpenAI API error details:', {
+                status: error.status,
+                message: error.message,
+                stack: error.stack
+            });
+            // Fall through to basic response
+        }
+    } else {
+        console.log('⚠️ No OpenAI API key available - using fallback response');
+    }
+    
+    // Generate a basic helpful response (fallback)
+    let response;
+    const lowerMessage = message.toLowerCase();
+    
+    if (lowerMessage.includes('hello') || lowerMessage.includes('hi') || lowerMessage.includes('hey')) {
+        response = `Hello! 👋 I'm your Smart Tooltip Companion. I can analyze web pages using OCR and provide intelligent insights about what you're viewing.${contextInfo}`;
+    } else if (lowerMessage.includes('analyze') || lowerMessage.includes('what is this page')) {
+        if (actualUrl && pageAnalysisCache.has(actualUrl)) {
+            const analysis = pageAnalysisCache.get(actualUrl);
+            response = `📊 Page Analysis for ${actualUrl}:\n• Type: ${analysis.pageType}\n• Confidence: ${Math.round(analysis.confidence * 100)}%\n• Key Topics: ${analysis.keyTopics.join(', ') || 'none'}\n• Suggestions: ${analysis.suggestedActions.join('; ') || 'none'}`;
+        } else {
+            response = `I can analyze pages! Hover over a link to capture a screenshot, then ask me to analyze it.`;
+        }
+    } else if (lowerMessage.includes('tooltip') || lowerMessage.includes('screenshot')) {
+        response = `The smart tooltip system now includes:\n• OCR text extraction from screenshots\n• Intelligent page type detection\n• Proactive suggestions based on content\n• Context-aware chat responses${contextInfo}`;
+    } else if (lowerMessage.includes('help')) {
+        response = `I can help you with:\n• 🔍 Page analysis (OCR + AI insights)\n• 📸 Smart tooltips with context\n• 🧠 Proactive suggestions\n• 💬 Context-aware chat\n\nTry: "analyze this page" or "what type of page is this?"${contextInfo}`;
+    } else {
+        // More helpful fallback message that doesn't assume user needs to add key
+        response = `I received your message: "${message}". I'm equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.${contextInfo}\n\nNote: For enhanced AI responses, ensure the backend has an OpenAI API key configured.`;
+    }
+    
+    return {
+        response,
+        timestamp: new Date().toISOString(),
+        context: actualUrl ? pageAnalysisCache.get(actualUrl) : null
+    };
+}
+
+// Initialize MCP Server
+const mcpServer = new MCPServer(
+    // captureHandler
+    async (url) => {
+        return await captureScreenshot(url);
+    },
+    // chatHandler
+    async ({ message, currentUrl, openaiKey, tooltipHistory }) => {
+        return await processChatRequest(
+            message,
+            currentUrl,
+            currentUrl, // url param
+            openaiKey,
+            tooltipHistory,
+            null, // pageInfo
+            null  // consoleLogs
+        );
+    },
+    // ocrHandler
+    async (image) => {
+        const imageBuffer = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+        const text = await extractTextFromScreenshot(imageBuffer);
+        return {
+            text,
+            characterCount: text.length,
+            success: true
+        };
+    },
+    // analysisHandler
+    async (url) => {
+        const analysis = pageAnalysisCache.get(url);
+        if (!analysis) {
+            return {
+                error: 'Analysis not found',
+                message: 'Page analysis not available. Take a screenshot first.'
+            };
+        }
+        return {
+            url,
+            analysis,
+            cached: true
+        };
+    }
+);
+
+// MCP endpoint - JSON-RPC 2.0 over HTTP POST
+app.post('/mcp', async (req, res) => {
+    try {
+        const request = req.body;
+        
+        console.log('🔌 MCP endpoint called:', {
+            method: request.method,
+            id: request.id,
+            hasParams: !!request.params,
+            jsonrpc: request.jsonrpc
+        });
+        
+        // Validate JSON-RPC 2.0 request
+        if (request.jsonrpc !== '2.0') {
+            console.error('❌ MCP: Invalid jsonrpc version:', request.jsonrpc);
+            return res.status(400).json({
+                jsonrpc: '2.0',
+                id: request.id || null,
+                error: {
+                    code: -32600,
+                    message: 'Invalid Request',
+                    data: 'jsonrpc must be "2.0"'
+                }
+            });
+        }
+        
+        // Handle JSON-RPC 2.0 request
+        const response = await mcpServer.handleRequest(request);
+        
+        console.log('🔌 MCP: Request handled, response:', {
+            hasError: !!response?.error,
+            hasResult: !!response?.result,
+            isNotification: response === null
+        });
+        
+        // Notifications don't return responses
+        if (response === null) {
+            console.log('🔌 MCP: Notification received (no response)');
+            return res.status(204).send(); // No Content
+        }
+        
+        res.json(response);
+    } catch (error) {
+        console.error('❌ MCP endpoint error:', error);
+        console.error('❌ MCP endpoint error details:', {
+            message: error.message,
+            stack: error.stack?.substring(0, 300),
+            requestId: req.body?.id
+        });
+        res.status(500).json({
+            jsonrpc: '2.0',
+            id: req.body?.id || null,
+            error: {
+                code: -32603,
+                message: 'Internal error',
+                data: error.message
+            }
+        });
+    }
+});
+
 // Start server
 async function start() {
     await initBrowser();
@@ -596,10 +765,11 @@ async function start() {
         console.log('═══════════════════════════════════════════════════');
         console.log(`📡 Server running on http://localhost:${PORT}`);
         console.log(`📸 Endpoint: POST http://localhost:${PORT}/capture`);
+        console.log(`🔌 MCP Endpoint: POST http://localhost:${PORT}/mcp`);
         console.log(`❤️  Health: GET http://localhost:${PORT}/health`);
         console.log('═══════════════════════════════════════════════════\n');
-        console.log('💡 Send a POST request with:');
-        console.log('   { "url": "https://example.com" }');
+        console.log('💡 REST API: POST /capture with { "url": "..." }');
+        console.log('🔌 MCP Protocol: POST /mcp with JSON-RPC 2.0');
         console.log('\n⏳ Waiting for requests...\n');
     });
 }

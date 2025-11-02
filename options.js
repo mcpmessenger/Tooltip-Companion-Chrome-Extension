@@ -1,11 +1,15 @@
-const defaultUrl = 'http://34.238.160.197:3000'; // AWS ECS Backend (updated 2025-11-01)
+const defaultUrl = 'http://34.238.170.86:3000'; // AWS ECS Backend (updated 2025-11-02)
 
 function saveOptions() {
   const url = document.getElementById('backendUrl').value;
   const openaiKey = document.getElementById('openaiKey').value;
+  const useMCP = document.getElementById('useMCP').checked;
   
   // Use chrome.storage.sync for cross-browser compatibility (Chrome/Firefox)
-  const dataToSave = { backendUrl: url || defaultUrl };
+  const dataToSave = { 
+    backendUrl: url || defaultUrl,
+    useMCP: useMCP
+  };
   
   // Only save API key if provided
   if (openaiKey && openaiKey.trim()) {
@@ -14,18 +18,24 @@ function saveOptions() {
   
   chrome.storage.sync.set(dataToSave, () => {
     const status = document.getElementById('status');
-    status.textContent = 'Settings saved! ' + (openaiKey ? 'AI features enabled!' : '');
-    status.style.color = '#4CAF50';
+    let statusText = 'Settings saved!';
+    if (openaiKey) statusText += ' AI features enabled!';
+    if (useMCP) statusText += ' MCP protocol enabled!';
+    status.textContent = statusText;
+    status.className = 'success';
+    status.style.display = 'block';
     setTimeout(() => {
       status.textContent = '';
+      status.style.display = 'none';
     }, 3000);
   });
 }
 
 function restoreOptions() {
   // Use chrome.storage.sync for cross-browser compatibility (Chrome/Firefox)
-  chrome.storage.sync.get({ backendUrl: defaultUrl, openaiKey: '' }, (items) => {
+  chrome.storage.sync.get({ backendUrl: defaultUrl, openaiKey: '', useMCP: false }, (items) => {
     document.getElementById('backendUrl').value = items.backendUrl;
+    document.getElementById('useMCP').checked = items.useMCP || false;
     if (items.openaiKey) {
       document.getElementById('openaiKey').value = items.openaiKey;
     }

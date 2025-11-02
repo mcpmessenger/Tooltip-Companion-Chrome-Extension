@@ -57,7 +57,7 @@
     
     // Default to cloud backend for production, fallback to localhost for development
     // Update DEFAULT_BACKEND after deploying to cloud (Railway, Render, etc.)
-    const DEFAULT_BACKEND = 'http://34.238.160.197:3000'; // AWS ECS Backend (updated 2025-11-01)
+    const DEFAULT_BACKEND = 'http://34.238.170.86:3000'; // AWS ECS Backend (updated 2025-11-02)
     const DEV_BACKEND = 'http://localhost:3000';
     
     chrome.storage.sync.get({ backendUrl: DEFAULT_BACKEND }, (items) => {
@@ -1651,6 +1651,13 @@
         const chatSend = document.getElementById('chat-send');
         const chatUpload = document.getElementById('chat-upload');
         const chatUploadInput = document.getElementById('chat-upload-input');
+        
+        // Verify button exists
+        if (!chatUpload) {
+            console.error('❌ Chat upload button not found!');
+        } else {
+            console.log('✅ Chat upload button found');
+        }
         const chatMessages = document.getElementById('chat-messages');
         const closeBtn = chatWidget.querySelector('.chat-close');
         const minimizeBtn = chatWidget.querySelector('.chat-minimize');
@@ -2223,24 +2230,44 @@
             };
             
             // Get API key from storage (optional - backend has default key)
-            chrome.storage.sync.get({ openaiKey: '' }, (items) => {
-                console.log('🔑 API Key from storage:', items.openaiKey ? 'Set (will use user key)' : 'Not set (will use backend default)');
-                
-                // Check if extension context is still valid
+            try {
                 if (!chrome.runtime?.id) {
                     addMessage('❌ Extension was reloaded. Please reload this page.', 'bot');
                     return;
                 }
                 
-                // Send chat message (backend will use default key if user key not provided)
-                chrome.runtime.sendMessage({
+                chrome.storage.sync.get({ openaiKey: '' }, (items) => {
+                    // Check for runtime errors (extension context invalidated)
+                    if (chrome.runtime.lastError) {
+                        const errorMsg = chrome.runtime.lastError.message;
+                        console.error('❌ Storage error:', errorMsg);
+                        if (errorMsg.includes('Extension context invalidated') || 
+                            errorMsg.includes('message port closed')) {
+                            addMessage('❌ Extension was reloaded. Please reload this page.', 'bot');
+                            return;
+                        }
+                        // For other errors, continue without API key (backend has default)
+                    }
+                    
+                    const userApiKey = items?.openaiKey || '';
+                    console.log('🔑 API Key from storage:', userApiKey ? `Set (${userApiKey.substring(0, 10)}...)` : 'Not set (will use backend default)');
+                    
+                    // Check if extension context is still valid
+                    if (!chrome.runtime?.id) {
+                        addMessage('❌ Extension was reloaded. Please reload this page.', 'bot');
+                        return;
+                    }
+                    
+                    // Send chat message (backend will use default key if user key not provided)
+                    console.log('📤 Sending chat message with API key:', userApiKey ? 'User key provided' : 'No user key (backend will use default)');
+                    chrome.runtime.sendMessage({
                     action: 'chat',
                     message: message,
                     url: window.location.href,
                     consoleLogs: consoleLogs.slice(-10), // Last 10 console entries
                     pageInfo: pageInfo,
                     tooltipHistory: window.tooltipHistory || [], // Recent tooltip events for context
-                    openaiKey: items.openaiKey || '' // Optional - backend has default
+                    openaiKey: userApiKey // Optional - backend has default
                 }, (response) => {
                     console.log('📨 Chat response received:', response);
                     
@@ -2263,7 +2290,15 @@
                         addMessage('❌ Backend service unavailable. Please check your backend URL in extension settings.', 'bot');
                     }
                 });
-            });
+                });
+            } catch (error) {
+                console.error('❌ Error accessing storage or sending message:', error);
+                if (error.message && error.message.includes('Extension context invalidated')) {
+                    addMessage('❌ Extension was reloaded. Please reload this page.', 'bot');
+                } else {
+                    addMessage(`❌ Error: ${error.message || 'Unknown error'}`, 'bot');
+                }
+            }
         }
         
         chatSend.addEventListener('click', sendMessage);
@@ -2272,22 +2307,32 @@
         });
         
         // Screenshot capture - camera button takes screenshot of current page
-        chatUpload.addEventListener('click', async () => {
+        if (!chatUpload) {
+            console.error('❌ Cannot attach click handler - chatUpload button not found');
+        } else {
+            console.log('✅ Attaching click handler to chat upload button');
+            chatUpload.addEventListener('click', async () => {
             try {
+                console.log('📸 OCR: User clicked screenshot button');
                 addMessage('📸 Capturing screenshot of current page...', 'bot');
                 
                 // Check if extension context is still valid
                 if (!chrome.runtime?.id) {
+                    console.error('📸 OCR: Extension context invalidated');
                     addMessage('❌ Extension was reloaded. Please reload this page.', 'bot');
                     return;
                 }
                 
+                console.log('📸 OCR: Requesting screenshot from background script...');
                 // Request screenshot from background script
                 chrome.runtime.sendMessage({
                     action: 'capture-screenshot'
                 }, (response) => {
+                    console.log('📸 OCR: Screenshot capture response:', response);
+                    
                     if (chrome.runtime.lastError) {
                         const errorMsg = chrome.runtime.lastError.message;
+                        console.error('📸 OCR: Runtime error:', errorMsg);
                         if (errorMsg.includes('Extension context invalidated') || 
                             errorMsg.includes('message port closed')) {
                             addMessage('❌ Extension was reloaded. Please reload this page.', 'bot');
@@ -2298,36 +2343,50 @@
                     }
                     
                     if (response && response.screenshot) {
+                        console.log('📸 OCR: Screenshot received, length:', response.screenshot.length);
                         // Process the screenshot for OCR
                         handleScreenshotForOCR(response.screenshot);
                     } else if (response && response.error) {
+                        console.error('📸 OCR: Screenshot error:', response.error);
                         addMessage(`❌ Screenshot failed: ${response.error}`, 'bot');
                     } else {
+                        console.error('📸 OCR: Failed to capture screenshot - invalid response');
                         addMessage('❌ Failed to capture screenshot', 'bot');
                     }
                 });
             } catch (error) {
+                console.error('📸 OCR: Exception during screenshot capture:', error);
                 addMessage(`❌ Error: ${error.message}`, 'bot');
             }
-        });
+            });
+            console.log('✅ Chat upload click handler attached');
+        }
         
         // Handle screenshot for OCR processing
         // Uses background script proxy to avoid Mixed Content issues on HTTPS pages
         async function handleScreenshotForOCR(dataUrl) {
             try {
+                console.log('📝 OCR: Starting OCR processing for screenshot');
+                console.log('📝 OCR: Image data URL length:', dataUrl ? dataUrl.length : 0);
+                
                 // Send to backend for OCR via background script proxy
                 const response = await new Promise((resolve, reject) => {
                     // Check if extension context is still valid
                     if (!chrome.runtime?.id) {
+                        console.error('📝 OCR: Extension context invalidated');
                         reject(new Error('Extension context invalidated. Please reload this page.'));
                         return;
                     }
                     
+                    console.log('📝 OCR: Sending OCR request to background script...');
                     chrome.runtime.sendMessage(
                         { action: 'ocr-upload', image: dataUrl },
                         (response) => {
+                            console.log('📝 OCR: Background script response:', response);
+                            
                             if (chrome.runtime.lastError) {
                                 const errorMsg = chrome.runtime.lastError.message;
+                                console.error('📝 OCR: Runtime error:', errorMsg);
                                 if (errorMsg.includes('Extension context invalidated') || 
                                     errorMsg.includes('message port closed')) {
                                     reject(new Error('Extension was reloaded. Please reload this page.'));
@@ -2335,26 +2394,49 @@
                                     reject(new Error(errorMsg));
                                 }
                             } else if (!response || !response.success) {
+                                console.error('📝 OCR: Failed response:', response);
                                 reject(new Error(response?.error || 'Failed to process OCR'));
                             } else {
+                                console.log('📝 OCR: Success response received');
                                 resolve(response);
                             }
                         }
                     );
                 });
                 
-                const data = response.data;
+                console.log('📝 OCR: Processing response data...');
                 
-                if (data.ocrText) {
-                    addMessage(`📝 Screenshot OCR Text:\n\n${data.ocrText}`, 'bot');
+                // Handle different response formats
+                // Background returns: { success: true, text: "...", characterCount: ..., data: {...} }
+                // Check for text at multiple possible locations
+                const ocrText = response.text || response.data?.text || response.data?.ocrText || null;
+                const characterCount = response.characterCount || response.data?.characterCount || 0;
+                const error = response.error || response.data?.error || null;
+                
+                console.log('📝 OCR: Response data:', {
+                    hasText: !!ocrText,
+                    textLength: ocrText?.length || 0,
+                    characterCount: characterCount,
+                    hasError: !!error,
+                    responseKeys: Object.keys(response),
+                    dataKeys: response.data ? Object.keys(response.data) : []
+                });
+                
+                if (ocrText && ocrText.trim().length > 0) {
+                    console.log('📝 OCR: Text extracted successfully, length:', ocrText.length, 'chars');
+                    addMessage(`📝 Screenshot OCR Text:\n\n${ocrText}`, 'bot');
                     chatInput.value = 'What does this text say?';
                     addMessage('💡 Tip: Ask questions about the extracted text!', 'bot');
-                } else if (data.error) {
-                    addMessage(`❌ OCR Error: ${data.error}`, 'bot');
+                } else if (error) {
+                    console.error('📝 OCR: Error in response:', error);
+                    addMessage(`❌ OCR Error: ${error}`, 'bot');
                 } else {
+                    console.log('📝 OCR: No text extracted (expected for images without text)');
                     addMessage('⚠️ No OCR text could be extracted from this screenshot.', 'bot');
                 }
             } catch (error) {
+                console.error('📝 OCR: Exception during OCR processing:', error);
+                console.error('📝 OCR: Error stack:', error.stack);
                 addMessage(`❌ Failed to process screenshot: ${error.message}`, 'bot');
             }
         }

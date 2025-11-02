@@ -267,6 +267,14 @@
             <label for="openaiKey">OpenAI API Key (Optional - for AI chat features)</label>
             <input type="password" id="openaiKey" placeholder="sk-proj-...">
             
+            <label style="margin-top: 25px; display: flex; align-items: center; cursor: pointer;">
+                <input type="checkbox" id="useMCP" style="width: auto; margin-right: 10px; cursor: pointer;">
+                <span>Enable MCP Protocol (Model Context Protocol)</span>
+            </label>
+            <p class="info-text" style="margin-top: 5px; margin-left: 24px;">
+                Use the standardized MCP protocol instead of REST API. Provides better structure for AI context and future extensibility.
+            </p>
+            
             <button id="saveButton">Save Settings</button>
             <div id="status"></div>
             
