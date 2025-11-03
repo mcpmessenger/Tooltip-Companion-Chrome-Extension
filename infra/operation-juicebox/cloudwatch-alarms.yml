@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Operation Juicebox - ECS Monitoring Alarms (Scaffolding)
+
+Parameters:
+  ClusterName:
+    Type: String
+    Description: Name of the ECS cluster (e.g., tooltip-companion-cluster)
+  ServiceName:
+    Type: String
+    Description: Name of the ECS service (e.g., tooltip-companion-backend-service)
+  AlarmTopicArn:
+    Type: String
+    Description: SNS topic ARN for critical alarm notifications
+
+Conditions:
+  HasAlarmTopic: !Not [ !Equals [ !Ref AlarmTopicArn, '' ] ]
+
+Resources:
+  CpuUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ojx-${ClusterName}-${ServiceName}-cpu-high'
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ClusterName
+        - Name: ServiceName
+          Value: !Ref ServiceName
+      AlarmDescription: 'Operation Juicebox: ECS service CPU > 80% for 2 of 3 minutes'
+      AlarmActions: !If [ HasAlarmTopic, [ !Ref AlarmTopicArn ], !Ref 'AWS::NoValue' ]
+
+  MemoryUtilizationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ojx-${ClusterName}-${ServiceName}-memory-high'
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      TreatMissingData: breaching
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ClusterName
+        - Name: ServiceName
+          Value: !Ref ServiceName
+      AlarmDescription: 'Operation Juicebox: ECS service memory > 80% for 2 of 3 minutes'
+      AlarmActions: !If [ HasAlarmTopic, [ !Ref AlarmTopicArn ], !Ref 'AWS::NoValue' ]
+
+  FiveHundredErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ojx-${ClusterName}-${ServiceName}-5xx-rate'
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 3
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Sum
+      Threshold: 5
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: '<TODO:ALB-METRIC-DIMENSION>'
+        - Name: TargetGroup
+          Value: '<TODO:TARGET-GROUP-DIMENSION>'
+      AlarmDescription: 'Operation Juicebox: ALB 5XX count >= 5 for 3 of 5 minutes'
+      AlarmActions: !If [ HasAlarmTopic, [ !Ref AlarmTopicArn ], !Ref 'AWS::NoValue' ]
+
+  UnhealthyHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ojx-${ClusterName}-${ServiceName}-target-health'
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 1
+      MetricName: HealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Average
+      Threshold: 1
+      TreatMissingData: breaching
+      Dimensions:
+        - Name: TargetGroup
+          Value: '<TODO:TARGET-GROUP-DIMENSION>'
+        - Name: LoadBalancer
+          Value: '<TODO:ALB-METRIC-DIMENSION>'
+      AlarmDescription: 'Operation Juicebox: Target group healthy hosts < 1'
+      AlarmActions: !If [ HasAlarmTopic, [ !Ref AlarmTopicArn ], !Ref 'AWS::NoValue' ]
+
+Outputs:
+  Notes:
+    Description: Fill in ALB/TargetGroup dimensions before deployment.
+    Value: 'See infra/operation-juicebox/README.md for deployment guidance.'
+
+

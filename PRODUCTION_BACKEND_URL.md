@@ -1,75 +1,88 @@
-# Production Backend Service URL
+# Production Backend
 
 ## Current Backend URL
 
-**Public IP Address (Direct Access):**
 ```
-http://34.238.160.197:3000
+https://backend.tooltipcompanion.com
 ```
 
-**⚠️ Note:** IP addresses may change when tasks restart. Use a Load Balancer for a stable endpoint.
-
-**Previous IP (deprecated):**
-- ~~http://54.211.114.152:3000~~ (old task, no longer active)
+✅ **HTTPS working**  
+✅ **Production ready**  
+✅ **Stable DNS**  
+✅ **All endpoints operational**
 
 ## Service Status
 
 - **Status**: ✅ Healthy and Running
 - **Deployment**: AWS ECS Fargate
 - **Cluster**: `tooltip-companion-cluster`
+- **Service**: `tooltip-companion-backend-service`
 - **Region**: `us-east-1`
 - **Port**: `3000`
+- **Load Balancer**: ALB with HTTPS/SSL
 
-## Verified Endpoints
+## Backend Endpoints
 
-- ✅ `GET /health` - Health check endpoint (working)
-- ⚠️ `GET /` - Service information endpoint (returns 404 - not critical)
-- ❌ `POST /capture` - Screenshot generation (**HTTP 500 Error - Backend issue**)
-- ⚠️ `POST /ocr-upload` - OCR text extraction (not tested)
-- ⚠️ `POST /chat` - AI chat with context (not tested)
+### REST API
+- `GET /health` - Health check ✅
+- `POST /capture` - Screenshot generation ✅
+- `POST /ocr-upload` - OCR text extraction ✅
+- `POST /chat` - AI chat with context ✅
 
-### Known Issues
-
-**Backend `/capture` endpoint is returning HTTP 500:**
-- Health check works fine
-- Screenshot capture fails with Internal Server Error
-- This indicates a backend service problem, not an extension issue
-- **Action Required**: Check backend logs and fix the `/capture` endpoint
-
-## Important Notes
-
-⚠️ **IP Address May Change**: This IP address is directly associated with the ECS Fargate task. If the task restarts or is recreated, the IP address may change.
-
-### Recommendation
-
-For production use, consider:
-1. **Load Balancer**: Set up an Application Load Balancer (ALB) or Network Load Balancer (NLB) for a stable endpoint
-2. **Route53 DNS**: Create a custom domain pointing to the load balancer
-3. **HTTPS**: Configure SSL/TLS certificate for secure connections
+### Model Context Protocol (MCP)
+- `POST /mcp` - JSON-RPC 2.0 endpoint ✅
+  - `initialize` - Protocol handshake
+  - `tools/list` - List available tools
+  - `tools/call` - Call tools (capture_screenshot, chat, ocr_upload, analyze_page)
+  - `resources/list` - List available resources
 
 ## Testing the Backend
 
-You can test the backend directly:
-
 ```powershell
 # Health check
-Invoke-WebRequest -Uri "http://54.211.114.152:3000/health" -Method GET
+Invoke-RestMethod -Uri "https://backend.tooltipcompanion.com/health" -Method GET
 
 # Expected response:
-# {"status":"healthy","timestamp":"...","uptime":...,"browser":"initialized","cache":{...}}
+# {
+#   "status": "healthy",
+#   "timestamp": "...",
+#   "uptime": ...,
+#   "browser": "initialized",
+#   "cache": {...},
+#   "features": {...},
+#   "config": {...}
+# }
 ```
 
-## Extension Configuration
+## Troubleshooting Scripts
 
-To use this backend in the extension:
+If you encounter 502 errors:
 
-1. Open Chrome Extensions (`chrome://extensions/`)
-2. Click "Options" on the Tooltip Companion extension
-3. Enter the backend URL: `http://54.211.114.152:3000`
-4. Click "Save Settings"
+```powershell
+# Run diagnostic script
+.\diagnose-and-fix-502.ps1
+
+# Or restart backend
+.\restart-backend-alb.ps1
+
+# Check logs
+.\check-backend-logs.ps1
+```
+
+## Deployment
+
+To deploy updates to the backend:
+
+```powershell
+# Full deployment (builds and deploys)
+.\deploy-backend.ps1
+
+# Or complete MCP deployment
+.\deploy-mcp-complete.ps1
+```
 
 ---
 
-**Last Updated**: 2025-11-01
-**Service**: tooltip-companion-cluster (1 active service, 1 running task)
-
+**Last Updated**: 2025-11-03  
+**Backend URL**: `https://backend.tooltipcompanion.com`  
+**Status**: ✅ Production Ready
