@@ -36,6 +36,17 @@
 - **REST API Fallback**: Automatic fallback to REST if MCP is unavailable
 - **Hybrid Architecture**: Best of both worlds - modern protocol with reliable fallback
 
+## 🧃 Operation Juicebox
+
+Operation **Juicebox** is our reliability program to harden Tooltip Companion for production scale. Phase 1 is now underway:
+
+- Structured JSON logging and health telemetry from the backend (`/health` now exposes retry + circuit breaker stats)
+- Resilient screenshot capture with exponential retries and host-level circuit breakers
+- CSP-aware fallback groundwork (local data-URI delivery for strict banking CSPs)
+- CloudWatch alarm & log-insights scaffolding under `infra/operation-juicebox/`
+
+Track progress in `docs/OPERATION_JUICEBOX.md`.
+
 ## 🚀 Quick Start
 
 ### Installation
@@ -62,7 +73,12 @@ The AI chat feature requires an OpenAI API key. Here's how to set it up:
 ## 🚀 Current Status
 
 **Version:** 1.4.1  
-**Status:** ✅ All Features Working
+**Status:** 🚧 Operation Juicebox Phase 1 (backend hardening) in progress
+
+### Operation Juicebox Highlights (Phase 1)
+- 🧠 Circuit breaker + retry scaffolding for screenshot capture
+- 📊 `/health` exposes capture metrics, circuit states, and configuration
+- 🪵 Structured JSON logging ready for CloudWatch Logs Insights (see `infra/operation-juicebox`)
 
 ### What's New in 1.4.1
 - 🔌 **Model Context Protocol (MCP) Support** - Standard protocol for AI context sharing
@@ -127,6 +143,10 @@ AI: "Based on the tooltip preview, the offer shows a **$325 bonus** for new chec
 │   ├── MCP_USAGE_GUIDE.md
 │   ├── MCP_DEBUG_GUIDE.md
 │   └── BACKEND_SETUP.md
+├── infra/operation-juicebox/ # Monitoring & capacity scaffolding for Operation Juicebox
+│   ├── cloudwatch-alarms.yml
+│   ├── log-metrics-queries.md
+│   └── ecs-capacity-checklist.md
 └── privacy-policy.md     # Privacy policy
 ```
 
@@ -175,6 +195,13 @@ See [docs/BACKEND_SETUP.md](docs/BACKEND_SETUP.md) for detailed backend setup.
   - `tools/call` - Call tools (capture_screenshot, chat, ocr_upload, analyze_page)
   - `tools/list` - List available tools
   - `resources/list` - List available resources
+
+#### Operation Juicebox Environment Variables
+- `CAPTURE_MAX_ATTEMPTS` (default `3`): Number of retry attempts for capture requests
+- `CAPTURE_BASE_DELAY_MS` (default `1000`): Base delay used for exponential backoff between retries
+- `CIRCUIT_BREAKER_THRESHOLD` (default `3`): Failures per host before the circuit opens
+- `CIRCUIT_BREAKER_COOLDOWN_MS` (default `300000`): Cooldown before retrying a failing host
+- `CIRCUIT_BREAKER_BLOCK_MS` (default `900000`): Block duration used when a host explicitly denies access (e.g. 403)
 
 ## 📚 Documentation
 

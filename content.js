@@ -139,7 +139,9 @@
             hideTimeout: null,
             currentUrl: null,
             displayStartTime: null,
-            isVisible: false
+            isVisible: false,
+            cspFallbackAttempted: false,
+            usingDataUri: false
         };
         let tooltipDiv = null;
         
@@ -340,12 +342,16 @@
                             </div>
                         ` : ''}
                         ${screenshotUrl ? `
-                            <div id="tooltip-screenshot-container" style="margin-top: 10px; display: none;">
+                            <div id="tooltip-screenshot-container" style="margin-top: 10px;">
                                 <img src="${screenshotUrl}" 
                                     style="display: block; width: 100%; height: auto; max-height: 200px; object-fit: cover; border-radius: 8px;" 
-                                    alt="Preview" 
-                                    onload="this.parentElement.style.display='block';"
-                                    onerror="this.parentElement.style.display='none';">
+                                    alt="Preview"
+                                    loading="lazy"
+                                    crossOrigin="anonymous"
+                                    referrerPolicy="no-referrer">
+                                <div style="display: none; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center; margin-top: 4px;">
+                                    ⚠️ Screenshot unavailable - backend may be experiencing issues
+                                </div>
                             </div>
                         ` : `
                             <div style="margin-top: 8px; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center;">
@@ -355,6 +361,85 @@
                     </div>
                 `;
                 tooltipDiv.innerHTML = summaryHTML;
+                
+                // Ensure screenshot loads and displays properly
+                if (screenshotUrl) {
+                    const img = tooltipDiv.querySelector('#tooltip-screenshot-container img');
+                    if (img) {
+                        img.dataset.usingDataUri = activeTooltip.usingDataUri ? 'true' : 'false';
+                        // Check if image is already loaded (cached)
+                        if (img.complete && img.naturalHeight !== 0) {
+                            console.log('✅ Screenshot image already loaded (cached)');
+                        } else {
+                            // Set up load handler for when image loads
+                            img.addEventListener('load', () => {
+                                console.log('✅ Screenshot image loaded successfully');
+                                img.dataset.usingDataUri = img.src.startsWith('data:') ? 'true' : 'false';
+                            });
+                            img.addEventListener('error', async (e) => {
+                                const tooltipUrl = activeTooltip.currentUrl;
+                                console.error('❌ Screenshot image failed to load:', screenshotUrl);
+                                console.error('❌ Image error details:', {
+                                    type: e.type,
+                                    target: e.target?.src,
+                                    isCORS: screenshotUrl && !screenshotUrl.startsWith('blob:') && !screenshotUrl.startsWith('data:'),
+                                    backendUrl: BACKEND_SERVICE_URL
+                                });
+
+                                const alreadyUsingDataUri = img.dataset.usingDataUri === 'true' || activeTooltip.usingDataUri;
+                                const alreadyAttemptedFallback = img.dataset.cspFallbackAttempted === 'true' || activeTooltip.cspFallbackAttempted;
+
+                                if (tooltipUrl && !alreadyUsingDataUri && !alreadyAttemptedFallback) {
+                                    console.log('🛡️ Attempting CSP fallback with data URI');
+                                    img.dataset.cspFallbackAttempted = 'true';
+                                    activeTooltip.cspFallbackAttempted = true;
+                                    try {
+                                        const fallbackContext = await fetchContext(tooltipUrl, { preferDataUri: true });
+                                        if (activeTooltip.currentUrl === tooltipUrl && fallbackContext?.screenshotUrl) {
+                                            console.log('✅ CSP fallback succeeded, updating screenshot');
+                                            activeTooltip.usingDataUri = !!fallbackContext.usedDataUri;
+                                            img.dataset.usingDataUri = fallbackContext.usedDataUri ? 'true' : 'false';
+                                            const existingCache = cache.get(tooltipUrl) || {};
+                                            cache.set(tooltipUrl, {
+                                                ...existingCache,
+                                                screenshotUrl: fallbackContext.screenshotUrl,
+                                                base64Data: fallbackContext.base64Data || existingCache.base64Data || null,
+                                                analysis: fallbackContext.analysis || existingCache.analysis || null,
+                                                text: fallbackContext.text || existingCache.text || '',
+                        originalUrl: fallbackContext.originalScreenshotUrl || existingCache.originalUrl || null,
+                                                timestamp: Date.now()
+                                            });
+                                            if (fallbackContext.base64Data) {
+                                                await saveToIndexedDB(tooltipUrl, fallbackContext.base64Data);
+                                            }
+                                            const errorDiv = img.nextElementSibling;
+                                            if (errorDiv) {
+                                                errorDiv.style.display = 'none';
+                                            }
+                                            img.style.display = 'block';
+                                            img.src = fallbackContext.screenshotUrl;
+                                            return;
+                                        }
+                                    } catch (fallbackError) {
+                                        console.error('❌ CSP fallback failed:', fallbackError);
+                                    }
+                                }
+
+                                img.style.display = 'none';
+                                const errorDiv = img.nextElementSibling;
+                                if (errorDiv) {
+                                    errorDiv.style.display = 'block';
+                                    errorDiv.textContent = '⚠️ Screenshot unavailable - backend may be experiencing issues';
+                                } else {
+                                    const errorMsg = document.createElement('div');
+                                    errorMsg.style.cssText = 'padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center; margin-top: 4px;';
+                                    errorMsg.textContent = '⚠️ Screenshot unavailable';
+                                    img.parentElement.appendChild(errorMsg);
+                                }
+                            });
+                        }
+                    }
+                }
             } else if (screenshotUrl) {
                 // Fallback: Show screenshot directly if no analysis available
                 tooltipDiv.innerHTML = `<img src="${screenshotUrl}" 
@@ -460,6 +545,8 @@
             // Reset state
             activeTooltip.isVisible = false;
             activeTooltip.displayStartTime = null;
+            activeTooltip.usingDataUri = false;
+            activeTooltip.cspFallbackAttempted = false;
         }
         
         // Check cache validity
@@ -479,35 +566,62 @@
         // Fetch context (screenshot + analysis) from backend with retry mechanism
         // Uses background script proxy to avoid Mixed Content issues on HTTPS pages
         // This replaces separate screenshot and analysis calls for better performance
-        async function fetchContext(url, retryCount = 0) {
+        // Phase 1 MCP Migration: Uses MCP-aligned structure for requests
+        async function fetchContext(url, optionsOrRetry = {}, retryOverride = undefined) {
+            let options = {};
+            let retryCount = 0;
+
+            if (typeof optionsOrRetry === 'number') {
+                retryCount = optionsOrRetry;
+            } else {
+                options = optionsOrRetry || {};
+                if (typeof retryOverride === 'number') {
+                    retryCount = retryOverride;
+                }
+            }
+
+            const preferDataUri = !!options.preferDataUri;
             const maxRetries = 2;
             const retryDelay = Math.pow(2, retryCount) * 1000; // Exponential backoff: 1s, 2s, 4s
-            
+
             // Check extension context before attempting fetch
             if (!isExtensionContextValid()) {
                 console.log(`ℹ️ Extension was reloaded. Please reload this page to enable tooltips.`);
                 throw new Error('Extension context invalidated. Please reload this page.');
             }
-            
+
             try {
                 console.log(`📸 Fetching context (screenshot + analysis) for: ${url}${retryCount > 0 ? ` (attempt ${retryCount + 1})` : ''}`);
-                console.log(`📸 Using consolidated /context endpoint via background script`);
-                
-                // Use background script to proxy the request (bypasses Mixed Content restrictions)
+                if (preferDataUri) {
+                    console.log('🛡️ Requesting CSP-safe screenshot (data URI fallback)');
+                }
+                console.log(`📸 Using MCP-aligned consolidated request via background script`);
+
+                const mcpResourceUri = `tooltip://context/${encodeURIComponent(url)}`;
+
                 const response = await new Promise((resolve, reject) => {
-                    // Double-check extension context is still valid
                     if (!isExtensionContextValid()) {
                         reject(new Error('Extension context invalidated. Please reload this page.'));
                         return;
                     }
-                    
+
                     chrome.runtime.sendMessage(
-                        { action: 'fetch-context', url: url },
+                        {
+                            action: 'fetch-context',
+                            url: url,
+                            options: {
+                                preferDataUri: preferDataUri
+                            },
+                            mcpResource: {
+                                uri: mcpResourceUri,
+                                name: 'Tooltip Context',
+                                description: 'Browsing context with screenshot and analysis'
+                            }
+                        },
                         (response) => {
                             if (chrome.runtime.lastError) {
                                 const errorMsg = chrome.runtime.lastError.message;
-                                // Handle extension context invalidated specifically
-                                if (errorMsg.includes('Extension context invalidated') || 
+                                if (errorMsg.includes('Extension context invalidated') ||
                                     errorMsg.includes('message port closed')) {
                                     reject(new Error('Extension was reloaded. Please reload this page to continue.'));
                                 } else {
@@ -521,14 +635,29 @@
                         }
                     );
                 });
-                
+
                 console.log(`📸 Context response received from background proxy`);
-                
+
                 const data = response.data;
-                console.log(`✅ Received context data, processing screenshot and analysis...`);
-                
-                // Extract screenshot URL or base64, analysis, and text from response
-                const screenshotUrlOrData = data.screenshotUrl || data.screenshot;
+
+                if (data.mcpResource) {
+                    console.log(`🔌 MCP Resource response received:`, {
+                        uri: data.mcpResource.uri,
+                        mimeType: data.mcpResource.mimeType,
+                        timestamp: data.mcpResource.timestamp
+                    });
+                }
+
+                console.log(`🔍 Context data fields:`, {
+                    hasScreenshotUrl: !!data.screenshotUrl,
+                    hasScreenshotDataUri: !!data.screenshotDataUri,
+                    screenshotUrlType: typeof data.screenshotUrl,
+                    screenshotType: typeof data.screenshot,
+                    hasAnalysis: !!data.analysis,
+                    hasText: !!data.text,
+                    keys: Object.keys(data)
+                });
+
                 const analysis = data.analysis || {
                     pageType: 'unknown',
                     keyTopics: [],
@@ -536,97 +665,174 @@
                     confidence: 0
                 };
                 const extractedText = data.text || '';
-                
-                let finalScreenshotUrl;
+
+                const normalizeUrlOrDataUri = (value) => {
+                    if (!value) return null;
+                    if (typeof value === 'string') {
+                        return value;
+                    }
+                    if (value && typeof value === 'object' && value.type === 'Buffer' && Array.isArray(value.data)) {
+                        try {
+                            const byteArray = Uint8Array.from(value.data);
+                            const chunkSize = 0x8000;
+                            let binary = '';
+                            for (let i = 0; i < byteArray.length; i += chunkSize) {
+                                const chunk = byteArray.subarray(i, i + chunkSize);
+                                binary += String.fromCharCode.apply(null, chunk);
+                            }
+                            const base64 = btoa(binary);
+                            return `data:image/png;base64,${base64}`;
+                        } catch (err) {
+                            console.warn('Failed to convert buffer screenshot to data URI:', err);
+                            return null;
+                        }
+                    }
+                    return null;
+                };
+
+                const rawScreenshotUrlValue = normalizeUrlOrDataUri(data.screenshotUrl);
+                const originalScreenshotUrlValue = normalizeUrlOrDataUri(data.originalScreenshotUrl);
+                let screenshotDataUri = normalizeUrlOrDataUri(data.screenshotDataUri);
+                if (!screenshotDataUri && typeof data.screenshot === 'string' && data.screenshot.startsWith('data:image/')) {
+                    screenshotDataUri = data.screenshot;
+                }
+
+                let legacyScreenshot = null;
+                if (typeof data.screenshot === 'string') {
+                    if (data.screenshot.startsWith('data:image/')) {
+                        legacyScreenshot = data.screenshot;
+                    } else if (data.screenshot.startsWith('http://') || data.screenshot.startsWith('https://')) {
+                        legacyScreenshot = data.screenshot;
+                    } else if (data.screenshot.length > 0) {
+                        legacyScreenshot = `data:image/png;base64,${data.screenshot}`;
+                    }
+                } else {
+                    legacyScreenshot = normalizeUrlOrDataUri(data.screenshot);
+                }
+
+                if (!legacyScreenshot && data.screenshotBuffer) {
+                    legacyScreenshot = normalizeUrlOrDataUri(data.screenshotBuffer);
+                }
+
+                let resolvedScreenshotUrl = null;
+                const normalizeUrl = (value) => {
+                    if (!value || !value.startsWith) return null;
+                    if (value.startsWith('/')) {
+                        return BACKEND_SERVICE_URL.replace(/\/$/, '') + value;
+                    }
+                    return value;
+                };
+
+                if (rawScreenshotUrlValue) {
+                    resolvedScreenshotUrl = normalizeUrl(rawScreenshotUrlValue);
+                }
+                if (!resolvedScreenshotUrl && originalScreenshotUrlValue) {
+                    resolvedScreenshotUrl = normalizeUrl(originalScreenshotUrlValue);
+                }
+
+                let finalScreenshotUrl = null;
                 let base64DataForStorage = null;
-                
-                // Check if screenshot is a URL (new format) or base64 (old format for backward compatibility)
-                if (screenshotUrlOrData && !screenshotUrlOrData.startsWith('data:image/') && (screenshotUrlOrData.startsWith('http://') || screenshotUrlOrData.startsWith('https://') || screenshotUrlOrData.startsWith('/'))) {
-                    // New format: URL reference
-                    // Resolve relative URLs to absolute
-                    if (screenshotUrlOrData.startsWith('/')) {
-                        // Relative URL - construct absolute URL using backend URL
-                        const backendBase = BACKEND_SERVICE_URL.replace(/\/$/, '');
-                        finalScreenshotUrl = backendBase + screenshotUrlOrData;
+
+                const resolvedIsDataUri = typeof resolvedScreenshotUrl === 'string' && resolvedScreenshotUrl.startsWith('data:image/');
+
+                if (preferDataUri && (screenshotDataUri || resolvedIsDataUri)) {
+                    finalScreenshotUrl = screenshotDataUri || resolvedScreenshotUrl;
+                    base64DataForStorage = finalScreenshotUrl;
+                } else if (!preferDataUri && typeof resolvedScreenshotUrl === 'string' && !resolvedIsDataUri) {
+                    finalScreenshotUrl = resolvedScreenshotUrl;
+                    if (screenshotDataUri) {
+                        base64DataForStorage = screenshotDataUri;
+                    }
+                } else if (screenshotDataUri || resolvedIsDataUri) {
+                    const dataUriValue = screenshotDataUri || resolvedScreenshotUrl;
+                    base64DataForStorage = dataUriValue;
+                    if (preferDataUri) {
+                        finalScreenshotUrl = dataUriValue;
                     } else {
-                        finalScreenshotUrl = screenshotUrlOrData;
+                        try {
+                            const commaIndex = dataUriValue.indexOf(',');
+                            const base64String = dataUriValue.substring(commaIndex + 1);
+                            const binaryString = atob(base64String);
+                            const bytes = new Uint8Array(binaryString.length);
+                            for (let i = 0; i < binaryString.length; i++) {
+                                bytes[i] = binaryString.charCodeAt(i);
+                            }
+                            const blob = new Blob([bytes], { type: 'image/png' });
+                            finalScreenshotUrl = URL.createObjectURL(blob);
+                            console.log('✅ Converted base64 screenshot to blob URL');
+                        } catch (err) {
+                            console.warn('Failed to convert data URI to blob URL:', err);
+                            finalScreenshotUrl = dataUriValue;
+                        }
                     }
-                    console.log(`✅ Screenshot URL received: ${finalScreenshotUrl}`);
-                } else if (screenshotUrlOrData && screenshotUrlOrData.startsWith('data:image/')) {
-                    // Old format: base64 data URL (backward compatibility)
-                    console.log(`⚠️ Received base64 screenshot (old format), converting to blob URL`);
-                    base64DataForStorage = screenshotUrlOrData;
-                    
-                    // Extract base64 data from data URL
-                    const commaIndex = screenshotUrlOrData.indexOf(',');
-                    const base64String = screenshotUrlOrData.substring(commaIndex + 1);
-                    
-                    // Convert base64 to blob
-                    const binaryString = atob(base64String);
-                    const bytes = new Uint8Array(binaryString.length);
-                    for (let i = 0; i < binaryString.length; i++) {
-                        bytes[i] = binaryString.charCodeAt(i);
-                    }
-                    const blob = new Blob([bytes], { type: 'image/png' });
-                    finalScreenshotUrl = URL.createObjectURL(blob);
-                    console.log(`✅ Converted base64 to blob URL`);
+                } else if (legacyScreenshot) {
+                    console.log('⚠️ Legacy screenshot field detected, converting to data URI');
+                    base64DataForStorage = legacyScreenshot;
+                    finalScreenshotUrl = legacyScreenshot;
+                } else if (typeof resolvedScreenshotUrl === 'string') {
+                    finalScreenshotUrl = resolvedScreenshotUrl;
                 } else {
                     throw new Error('No screenshot data or URL in response');
                 }
-                
+
                 console.log(`📊 Analysis received: ${analysis.pageType} (confidence: ${Math.round(analysis.confidence * 100)}%)`);
-                
-                // Clean up old blob URLs to prevent memory leaks
+
                 const cacheEntry = cache.get(url);
                 if (cacheEntry && cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('blob:')) {
                     URL.revokeObjectURL(cacheEntry.screenshotUrl);
                 }
-                
-                // Cache screenshot URL, analysis, and text
+
                 cache.set(url, {
                     screenshotUrl: finalScreenshotUrl,
-                    base64Data: base64DataForStorage,  // Store base64 only if we received it (old format)
-                    analysis: analysis,               // Store analysis for cognitive summary
-                    text: extractedText,              // Store extracted text
-                    timestamp: Date.now()
+                    base64Data: base64DataForStorage,
+                    analysis: analysis,
+                    text: extractedText,
+                    originalUrl: resolvedScreenshotUrl,
+                    timestamp: Date.now(),
+                    mcpResource: data.mcpResource || null
                 });
-                
-                // Also save to IndexedDB for persistence (save base64 if available, otherwise store URL)
+
                 if (base64DataForStorage) {
                     await saveToIndexedDB(url, base64DataForStorage);
                 }
-                
+
                 console.log(`✅ Context cached successfully (screenshot + analysis)`);
                 return {
                     screenshotUrl: finalScreenshotUrl,
                     analysis: analysis,
-                    text: extractedText
+                    text: extractedText,
+                    base64Data: base64DataForStorage,
+                    usedDataUri: preferDataUri || (typeof finalScreenshotUrl === 'string' && finalScreenshotUrl.startsWith('data:')),
+                    originalScreenshotUrl: resolvedScreenshotUrl
                 };
-                
+
             } catch (error) {
-                // Handle extension context invalidation gracefully (don't log as error)
-                if (error.message.includes('Extension context invalidated') || 
+                if (error.message.includes('Extension context invalidated') ||
                     error.message.includes('Extension was reloaded') ||
                     error.message.includes('message port closed')) {
                     console.log(`ℹ️ Extension was reloaded. Reload this page to enable tooltips.`);
-                    // Don't retry - user needs to reload page
                     throw error;
                 }
-                
+
                 console.error(`❌ Failed to fetch context for ${url}:`, error);
-                
-                // Provide helpful error messages based on error type and HTTP status
+
                 let errorMessage = error.message;
-                const isTimeout = error.message.includes('504') || 
-                                 error.message.includes('timeout') || 
+                const isTimeout = error.message.includes('504') ||
+                                 error.message.includes('timeout') ||
                                  error.message.includes('Timeout') ||
                                  error.message.includes('Page load timeout');
                 const is403 = error.message.includes('403') || error.message.includes('blocked');
                 const is404 = error.message.includes('404') || error.message.includes('not found');
                 const is500 = error.message.includes('500') || error.message.includes('Internal Server');
+                const is502 = error.message.includes('502') || error.message.includes('Bad Gateway');
+                const is503 = error.message.includes('503') || error.message.includes('Service Unavailable');
                 const isFailedFetch = error.message.includes('Failed to fetch');
-                
-                if (isTimeout) {
+
+                if (is502) {
+                    errorMessage = '🔧 Bad Gateway (502): The backend received an invalid response from its internal service. The backend may be restarting or there\'s a communication issue. Please try again in a few moments.';
+                } else if (is503) {
+                    errorMessage = '🔧 Backend service temporarily unavailable (503): The screenshot service is currently down or overloaded. Please try again in a few moments.';
+                } else if (isTimeout) {
                     errorMessage = '⏱️ Page load timeout: This page took too long to load. The site may be slow, blocking automated access, or require authentication.';
                 } else if (is403) {
                     errorMessage = '🚫 Access denied: This site blocks automated access. Try visiting the page manually in your browser first.';
@@ -639,31 +845,31 @@
                 } else if (isFailedFetch) {
                     errorMessage = '🌐 Network error: Backend may be unreachable. Check your internet connection and backend URL settings.';
                 }
-                
+
                 console.error(`❌ Error details:`, {
                     message: errorMessage,
                     originalError: error.message,
                     backendUrl: BACKEND_SERVICE_URL,
                     url: url,
                     retryCount: retryCount,
+                    preferDataUri,
                     note: 'Request proxied through background script to avoid Mixed Content'
                 });
-                
-                // Don't retry if extension context is invalidated
-                if (error.message.includes('Extension context invalidated') || 
+
+                if (error.message.includes('Extension context invalidated') ||
                     error.message.includes('Extension was reloaded') ||
                     error.message.includes('message port closed')) {
-                    throw error; // Stop retrying, user needs to reload page
+                    throw error;
                 }
-                
-                // Don't retry for 403 (blocked) or 404 (not found) - these won't succeed on retry
-                // Only retry for timeout, 500 errors, or network failures
-                if (retryCount < maxRetries && !is403 && !is404 && (isTimeout || is500 || isFailedFetch)) {
-                    console.log(`🔄 Retrying in ${retryDelay / 1000}s... (attempt ${retryCount + 2}/${maxRetries + 1})`);
-                    await new Promise(resolve => setTimeout(resolve, retryDelay));
-                    return fetchContext(url, retryCount + 1);
+
+                if (retryCount < maxRetries && !is403 && !is404 && (is502 || is503 || isTimeout || is500 || isFailedFetch)) {
+                    const retryDelayForGateway = (is502 || is503) ? retryDelay * 2 : retryDelay;
+                    const errorType = is502 ? '502 Bad Gateway' : (is503 ? '503 Service Unavailable' : '');
+                    console.log(`🔄 Retrying in ${retryDelayForGateway / 1000}s... (attempt ${retryCount + 2}/${maxRetries + 1})${errorType ? ` [${errorType} - using longer delay]` : ''}`);
+                    await new Promise(resolve => setTimeout(resolve, retryDelayForGateway));
+                    return fetchContext(url, options, retryCount + 1);
                 }
-                
+
                 throw error;
             }
         }
@@ -673,7 +879,7 @@
         async function fetchScreenshot(url, retryCount = 0) {
             // Redirect to fetchContext but only return screenshot URL for compatibility
             try {
-                const context = await fetchContext(url, retryCount);
+                const context = await fetchContext(url, {}, retryCount);
                 return context.screenshotUrl;
             } catch (error) {
                 throw error;
@@ -776,7 +982,10 @@
                 return {
                     screenshotUrl: cacheEntry.screenshotUrl,
                     analysis: cacheEntry.analysis || null,
-                    text: cacheEntry.text || ''
+                    text: cacheEntry.text || '',
+                    base64Data: cacheEntry.base64Data || null,
+                    usedDataUri: !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:')),
+                    originalScreenshotUrl: cacheEntry.originalUrl || null
                 };
             }
             
@@ -786,13 +995,16 @@
                 return {
                     screenshotUrl: indexedDBScreenshot,
                     analysis: cacheEntry.analysis,
-                    text: cacheEntry.text || ''
+                    text: cacheEntry.text || '',
+                    base64Data: cacheEntry.base64Data || null,
+                    usedDataUri: !!(indexedDBScreenshot && indexedDBScreenshot.startsWith('data:')),
+                    originalScreenshotUrl: cacheEntry.originalUrl || null
                 };
             }
             
             // Fetch from backend (new consolidated endpoint)
             console.log(`🌐 Fetching context from backend: ${url}`);
-            const context = await fetchContext(url);
+            const context = await fetchContext(url, { preferDataUri: true });
             
             return context;
         }
@@ -1019,6 +1231,8 @@
             // Set active element
             activeTooltip.element = element;
             activeTooltip.currentUrl = url;
+            activeTooltip.cspFallbackAttempted = false;
+            activeTooltip.usingDataUri = false;
             
             // Check cache first
             const cacheEntry = cache.get(url);
@@ -1028,6 +1242,8 @@
                     if (activeTooltip.element === element && activeTooltip.currentUrl === url && !activeTooltip.isVisible) {
                         // Show tooltip with cognitive summary and cached screenshot
                         showTooltip(event.clientX, event.clientY, cacheEntry.screenshotUrl, cacheEntry.analysis);
+                        activeTooltip.usingDataUri = !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:'));
+                        activeTooltip.cspFallbackAttempted = activeTooltip.usingDataUri;
                         // Log tooltip event for AI awareness
                         logTooltipEvent({
                             url: url,
@@ -1082,13 +1298,10 @@
                             clearTimeout(loadingTimeout);
                             // Check if still valid before showing
                             if (activeTooltip.element === element && activeTooltip.currentUrl === url) {
-                                // Show cognitive summary immediately with screenshot loading in background
+                                activeTooltip.usingDataUri = !!context.usedDataUri;
+                                activeTooltip.cspFallbackAttempted = !!context.usedDataUri;
+                                // Show cognitive summary with screenshot (screenshot now displays immediately)
                                 showTooltip(event.clientX, event.clientY, context.screenshotUrl, context.analysis);
-                                
-                                // Update screenshot when it loads (for hybrid tooltip)
-                                if (context.screenshotUrl) {
-                                    updateTooltipWithScreenshot(context.screenshotUrl);
-                                }
                                 
                                 // Log tooltip event for AI awareness
                                 logTooltipEvent({

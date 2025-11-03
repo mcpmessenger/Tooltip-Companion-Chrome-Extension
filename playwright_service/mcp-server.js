@@ -23,6 +23,10 @@ class MCPServer {
                         url: {
                             type: 'string',
                             description: 'The URL of the page to capture'
+                        },
+                        preferDataUri: {
+                            type: 'boolean',
+                            description: 'Return screenshot as data URI (for CSP-restricted pages)'
                         }
                     },
                     required: ['url']
@@ -270,14 +274,23 @@ class MCPServer {
                 if (!this.captureHandler) {
                     throw new Error('Capture handler not available');
                 }
-                const screenshot = await this.captureHandler(args.url);
+                const captureResult = await this.captureHandler(args.url, {
+                    includeDataUri: !!args.preferDataUri
+                });
+                const screenshotUrl = captureResult?.screenshotUrl || captureResult?.dataUri || null;
+                const screenshotDataUri = captureResult?.dataUri || (screenshotUrl && screenshotUrl.startsWith('data:image/') ? screenshotUrl : null);
                 return {
                     content: [
                         {
                             type: 'text',
                             text: JSON.stringify({
-                                screenshot,
+                                screenshot: captureResult?.dataUri || screenshotUrl,
+                                screenshotUrl: screenshotUrl,
+                                originalScreenshotUrl: captureResult?.originalUrl || screenshotUrl,
+                                screenshotDataUri,
                                 url: args.url,
+                                analysis: captureResult?.analysis || null,
+                                text: captureResult?.text || '',
                                 timestamp: new Date().toISOString()
                             })
                         }
@@ -347,12 +360,91 @@ class MCPServer {
 
     /**
      * Handle resources/read request
+     * Phase 1: Enhanced to return full context (screenshot + analysis) for tooltip://context/{url} URIs
      */
     async handleResourceRead(params) {
-        const { uri } = params;
+        const { uri, options } = params || {};
         
-        // For now, return basic context structure
-        // In MVP-2, this will be enhanced with structured context
+        // Phase 1: Extract URL from MCP Resource URI (format: tooltip://context/{url})
+        if (uri && uri.startsWith('tooltip://context/')) {
+            try {
+                const encodedUrl = uri.replace('tooltip://context/', '');
+                const url = decodeURIComponent(encodedUrl);
+                const preferDataUri = !!(options?.preferDataUri);
+
+                console.log(`🔌 MCP Resource Read: Fetching context for ${url}`);
+
+                // Use handlers to get full context
+                if (!this.captureHandler) {
+                    throw new Error('Capture handler not available');
+                }
+
+                // Capture screenshot and get analysis
+                const captureResult = await this.captureHandler(url, {
+                    includeDataUri: preferDataUri
+                });
+                const screenshotUrl = captureResult?.screenshotUrl || captureResult?.dataUri || null;
+                const screenshotDataUri = captureResult?.dataUri || (screenshotUrl && screenshotUrl.startsWith('data:image/') ? screenshotUrl : null);
+                const finalScreenshot = preferDataUri && screenshotDataUri ? screenshotDataUri : screenshotUrl;
+
+                // Get analysis from cache (captureHandler should have cached it)
+                let analysis = {
+                    pageType: 'unknown',
+                    keyTopics: [],
+                    suggestedActions: [],
+                    confidence: 0
+                };
+                
+                if (this.analysisHandler) {
+                    try {
+                        const analysisResult = await this.analysisHandler(url);
+                        // analysisHandler returns { analysis, ... } or just analysis
+                        if (analysisResult && analysisResult.analysis) {
+                            analysis = analysisResult.analysis;
+                        } else if (analysisResult && analysisResult.pageType) {
+                            // analysisResult IS the analysis object
+                            analysis = analysisResult;
+                        } else if (analysisResult && !analysisResult.error) {
+                            // Use result as-is if it looks like analysis
+                            analysis = analysisResult;
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ Analysis handler failed, using default:', e.message);
+                    }
+                }
+                
+                // Structure response as MCP Resource with full context
+                return {
+                    uri,
+                    mimeType: 'application/json',
+                    text: JSON.stringify({
+                        type: 'tooltip_context',
+                        url: url,
+                        screenshotUrl: finalScreenshot,
+                        screenshot: finalScreenshot,
+                        originalScreenshotUrl: captureResult?.originalUrl || screenshotUrl,
+                        screenshotDataUri,
+                        analysis: captureResult?.analysis || analysis,
+                        text: captureResult?.text || '',
+                        timestamp: new Date().toISOString()
+                    })
+                };
+            } catch (error) {
+                console.error(`❌ MCP Resource Read error for ${uri}:`, error.message);
+                // Return error structure
+                return {
+                    uri,
+                    mimeType: 'application/json',
+                    text: JSON.stringify({
+                        type: 'tooltip_context',
+                        error: error.message,
+                        timestamp: new Date().toISOString()
+                    })
+                };
+            }
+        }
+        
+        // Fallback: Return basic context structure for other URIs
         return {
             uri,
             mimeType: 'application/json',

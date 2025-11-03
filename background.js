@@ -106,14 +106,17 @@ async function captureScreenshotMCP(backendUrl, url) {
 }
 
 // REST-based screenshot capture (existing implementation)
-async function captureScreenshotREST(backendUrl, url) {
+async function captureScreenshotREST(backendUrl, url, options = {}) {
     const normalizedUrl = normalizeBackendUrl(backendUrl);
     const res = await fetch(`${normalizedUrl}/capture`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ url })
+        body: JSON.stringify({
+            url,
+            preferDataUri: !!options.preferDataUri
+        })
     });
     
     if (!res.ok) {
@@ -138,15 +141,103 @@ async function captureScreenshotREST(backendUrl, url) {
     return { success: true, data };
 }
 
+// MCP-based context fetch (uses MCP Resource structure)
+// Phase 1: Reads context via MCP resources/read which returns full context (screenshot + analysis)
+async function fetchContextMCP(backendUrl, url, mcpResource, options = {}) {
+    try {
+        if (!mcpClient) {
+            const initialized = await initMCPClient(backendUrl);
+            if (!initialized) {
+                throw new Error('MCP client initialization failed');
+            }
+        }
+        
+        // Phase 1: Use MCP resources/read for context
+        // Structure aligns with MCP Resource concept: tooltip://context/{url}
+        const resourceUri = mcpResource?.uri || `tooltip://context/${encodeURIComponent(url)}`;
+        console.log('🔌 MCP: Reading context resource:', resourceUri);
+        
+        const resource = await mcpClient.readResource(resourceUri, {
+            preferDataUri: !!options.preferDataUri
+        });
+        
+        // Parse MCP Resource response
+        if (resource && resource.text) {
+            let resourceData;
+            try {
+                resourceData = JSON.parse(resource.text);
+            } catch (parseError) {
+                console.error('❌ Failed to parse MCP Resource JSON:', parseError);
+                console.error('❌ Resource text (first 500 chars):', resource.text.substring(0, 500));
+                throw new Error(`Invalid JSON in MCP Resource response: ${parseError.message}`);
+            }
+            
+            // Debug logging
+            console.log('🔌 MCP Resource parsed:', {
+                hasUrl: !!resourceData.url,
+                hasScreenshotUrl: !!resourceData.screenshotUrl,
+                hasScreenshot: !!resourceData.screenshot,
+                hasAnalysis: !!resourceData.analysis,
+                type: resourceData.type
+            });
+            
+            // Check for errors in resource response
+            if (resourceData.error) {
+                throw new Error(resourceData.error);
+            }
+            
+            // Validate screenshot data exists
+            const screenshotUrl = resourceData.screenshotUrl || resourceData.screenshot;
+            if (!screenshotUrl) {
+                console.error('❌ MCP Resource missing screenshot data. Resource data:', resourceData);
+                throw new Error('MCP Resource response missing screenshot data');
+            }
+            
+            // Phase 1: MCP server now returns full context directly
+            // Structure response as MCP Resource with metadata
+            return {
+                success: true,
+                data: {
+                    url: resourceData.url || url,
+                    screenshotUrl: screenshotUrl,
+                    screenshot: screenshotUrl, // For backward compatibility
+                    analysis: resourceData.analysis || {
+                        pageType: 'unknown',
+                        keyTopics: [],
+                        suggestedActions: [],
+                        confidence: 0
+                    },
+                    text: resourceData.text || '',
+                    screenshotDataUri: resourceData.screenshotDataUri || (typeof screenshotUrl === 'string' && screenshotUrl.startsWith('data:image/') ? screenshotUrl : null),
+                    // MCP Resource metadata
+                    mcpResource: {
+                        uri: resourceUri,
+                        mimeType: resource.mimeType || 'application/json',
+                        timestamp: resourceData.timestamp || new Date().toISOString()
+                    }
+                }
+            };
+        }
+        
+        throw new Error('Invalid MCP Resource response format');
+    } catch (error) {
+        console.error('❌ MCP context fetch error:', error);
+        throw error;
+    }
+}
+
 // REST-based context fetch (consolidated endpoint - returns screenshot AND analysis)
-async function fetchContextREST(backendUrl, url) {
+async function fetchContextREST(backendUrl, url, options = {}) {
     const normalizedUrl = normalizeBackendUrl(backendUrl);
     const res = await fetch(`${normalizedUrl}/context`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ url })
+        body: JSON.stringify({
+            url,
+            preferDataUri: !!options.preferDataUri
+        })
     });
     
     if (!res.ok) {
@@ -168,7 +259,21 @@ async function fetchContextREST(backendUrl, url) {
     }
     
     const data = await res.json();
-    return { success: true, data };
+    
+    // Phase 1: Structure REST response to align with MCP Resource format
+    // This makes migration transparent to content.js
+    return {
+        success: true,
+        data: {
+            ...data,
+            // Add MCP Resource metadata for consistency
+            mcpResource: {
+                uri: `tooltip://context/${encodeURIComponent(url)}`,
+                mimeType: 'application/json',
+                timestamp: data.timestamp || new Date().toISOString()
+            }
+        }
+    };
 }
 
 // MCP-based chat
@@ -538,9 +643,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     else if (request.action === 'fetch-context') {
         // Fetch consolidated context (screenshot + analysis) from backend
-        // This replaces separate /capture and /analyze calls for better performance
+        // Phase 1 MCP Migration: Supports both REST and MCP protocols
         console.log('📸 Fetching context from backend (screenshot + analysis)...');
         console.log('🔹 URL:', request.url);
+        console.log('🔹 MCP Resource:', request.mcpResource?.uri || 'N/A');
         
         // Keep message channel open for async response
         const sendResponseAsync = (response) => {
@@ -555,12 +661,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         };
         
-        // Get backend URL from storage
+        // Get backend URL and protocol preference from storage
         getProtocolPreference(async (useMCP, backendUrl) => {
             try {
-                // Try /context endpoint first (new consolidated endpoint)
+                // Phase 1: Try MCP protocol first if enabled, otherwise use REST
+                if (useMCP && request.mcpResource) {
+                    console.log('🔌 Using MCP protocol for context fetch');
+                    try {
+                        const result = await fetchContextMCP(backendUrl, request.url, request.mcpResource, request.options || {});
+                        console.log('✅ Context data received via MCP (screenshot + analysis)');
+                        sendResponseAsync(result);
+                        return;
+                    } catch (mcpError) {
+                        console.warn('⚠️ MCP context fetch failed, falling back to REST:', mcpError.message);
+                        // Fall through to REST fallback
+                    }
+                }
+                
+                // Use REST API /context endpoint (consolidated endpoint)
                 console.log('🌐 Using REST API /context endpoint');
-                const result = await fetchContextREST(backendUrl, request.url);
+                const result = await fetchContextREST(backendUrl, request.url, request.options || {});
                 
                 console.log('✅ Context data received from backend (screenshot + analysis)');
                 sendResponseAsync(result);
@@ -584,7 +704,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }
                 try {
                     // Fallback to old /capture endpoint
-                    const fallbackResult = await captureScreenshotREST(backendUrl, request.url);
+                    const fallbackResult = await captureScreenshotREST(backendUrl, request.url, request.options || {});
                     
                     // Get analysis separately if available
                     const normalizedUrl = normalizeBackendUrl(backendUrl);
@@ -607,6 +727,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         data: {
                             screenshot: fallbackResult.data.screenshot || fallbackResult.data.screenshotUrl,
                             screenshotUrl: fallbackResult.data.screenshotUrl || fallbackResult.data.screenshot,
+                            originalScreenshotUrl: fallbackResult.data.originalScreenshotUrl || fallbackResult.data.screenshotUrl || fallbackResult.data.screenshot,
+                            screenshotDataUri: fallbackResult.data.screenshotDataUri || null,
                             analysis: analysis || {
                                 pageType: 'unknown',
                                 keyTopics: [],

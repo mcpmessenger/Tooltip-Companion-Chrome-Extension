@@ -9,6 +9,9 @@ const MCPServer = require('./mcp-server');
 const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
+const { performance } = require('perf_hooks');
+
+const logger = require('./logger');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -51,6 +54,137 @@ let screenshotTokens = new Map(); // Map token -> filepath for signed URLs
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const BLOCKED_TTL = 60 * 60 * 1000; // Don't retry blocked sites for 1 hour
 
+// Resilience configuration (Operation Juicebox)
+const MAX_CAPTURE_ATTEMPTS = Number(process.env.CAPTURE_MAX_ATTEMPTS || 3);
+const CAPTURE_BASE_DELAY_MS = Number(process.env.CAPTURE_BASE_DELAY_MS || 1000);
+const CIRCUIT_BREAKER_THRESHOLD = Number(process.env.CIRCUIT_BREAKER_THRESHOLD || 3);
+const CIRCUIT_BREAKER_COOLDOWN_MS = Number(process.env.CIRCUIT_BREAKER_COOLDOWN_MS || 5 * 60 * 1000);
+const CIRCUIT_BREAKER_BLOCK_MS = Number(process.env.CIRCUIT_BREAKER_BLOCK_MS || 15 * 60 * 1000);
+
+const captureMetrics = {
+    totalRequests: 0,
+    successfulRequests: 0,
+    failedRequests: 0,
+    averageDurationMs: 0,
+    lastFailureAt: null
+};
+
+const circuitBreakerState = new Map(); // host -> { failures, openedAt, nextAttemptAt }
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function getHostFromUrl(targetUrl) {
+    try {
+        return new URL(targetUrl).hostname;
+    } catch (error) {
+        return null;
+    }
+}
+
+function getCircuit(host) {
+    if (!host) return null;
+    if (!circuitBreakerState.has(host)) {
+        circuitBreakerState.set(host, {
+            failures: 0,
+            openedAt: null,
+            nextAttemptAt: null
+        });
+    }
+    return circuitBreakerState.get(host);
+}
+
+function isCircuitOpen(host) {
+    const state = getCircuit(host);
+    if (!state) return false;
+    if (!state.nextAttemptAt) return false;
+    const now = Date.now();
+    return state.nextAttemptAt > now;
+}
+
+function recordCircuitFailure(host, options = {}) {
+    const state = getCircuit(host);
+    if (!state) return;
+
+    state.failures += 1;
+    const now = Date.now();
+
+    if (state.failures >= CIRCUIT_BREAKER_THRESHOLD || options.forceOpen) {
+        const cooldown = options.cooldownMs || CIRCUIT_BREAKER_COOLDOWN_MS;
+        state.openedAt = now;
+        state.nextAttemptAt = now + cooldown;
+
+        logger.warn({
+            event: 'circuit_breaker.opened',
+            host,
+            failures: state.failures,
+            cooldownMs: cooldown
+        }, 'Circuit breaker opened');
+    }
+}
+
+function recordCircuitSuccess(host) {
+    const state = getCircuit(host);
+    if (!state) return;
+
+    if (state.failures > 0 || state.nextAttemptAt) {
+        logger.debug({
+            event: 'circuit_breaker.reset',
+            host,
+            previousFailures: state.failures
+        }, 'Circuit breaker reset after successful capture');
+    }
+
+    state.failures = 0;
+    state.openedAt = null;
+    state.nextAttemptAt = null;
+}
+
+function getCircuitSnapshot() {
+    const snapshot = [];
+    const now = Date.now();
+    for (const [host, state] of circuitBreakerState.entries()) {
+        snapshot.push({
+            host,
+            failures: state.failures,
+            openedAt: state.openedAt,
+            nextAttemptAt: state.nextAttemptAt,
+            remainingMs: state.nextAttemptAt ? Math.max(0, state.nextAttemptAt - now) : 0
+        });
+    }
+    return snapshot.filter(entry => entry.failures > 0 || entry.remainingMs > 0);
+}
+
+function createCircuitOpenError(host) {
+    const state = getCircuit(host);
+    const retryAfterSeconds = state?.nextAttemptAt ? Math.ceil((state.nextAttemptAt - Date.now()) / 1000) : undefined;
+    const error = new Error(`Circuit open for ${host}. Retry after ${retryAfterSeconds || 60} seconds.`);
+    error.name = 'CircuitOpenError';
+    error.isBlocked = true;
+    if (retryAfterSeconds) {
+        error.retryAfter = `${retryAfterSeconds}s`;
+    }
+    return error;
+}
+
+const RETRYABLE_ERROR_PATTERNS = [
+    /Navigation Timeout/i,
+    /net::ERR_CONNECTION_RESET/i,
+    /net::ERR_CONNECTION_CLOSED/i,
+    /net::ERR_CONNECTION_REFUSED/i,
+    /net::ERR_TIMED_OUT/i,
+    /Execution context was destroyed/i,
+    /Protocol error/i,
+    /Target closed/i
+];
+
+function isRetryableError(error) {
+    if (!error) return false;
+    if (error.isBlocked) return false;
+    if (error.isTimeout) return true;
+    const message = error.message || '';
+    return RETRYABLE_ERROR_PATTERNS.some(pattern => pattern.test(message));
+}
+
 // Screenshot storage configuration
 const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR || path.join(process.cwd(), 'tmp', 'screenshots');
 const SCREENSHOT_URL_BASE = process.env.SCREENSHOT_URL_BASE || ''; // Base URL for screenshots (set to backend URL in production)
@@ -59,12 +193,15 @@ const SCREENSHOT_URL_BASE = process.env.SCREENSHOT_URL_BASE || ''; // Base URL f
 async function ensureScreenshotDir() {
     try {
         await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
-        console.log(`[OK] Screenshot directory ready: ${SCREENSHOT_DIR}`);
+        logger.info({ event: 'screenshot.dir_ready', path: SCREENSHOT_DIR }, 'Screenshot directory ready');
         return true;
     } catch (error) {
         // Log warning but don't crash - fall back to base64 if needed
-        console.warn(`[WARN] Failed to create screenshot directory: ${error.message}`);
-        console.warn(`[WARN] Screenshots will use base64 encoding instead of file storage`);
+        logger.warn({
+            event: 'screenshot.dir_error',
+            path: SCREENSHOT_DIR,
+            error: error.message
+        }, 'Failed to create screenshot directory, falling back to base64 encoding');
         return false;
     }
 }
@@ -92,12 +229,20 @@ async function saveScreenshotToDisk(screenshotBuffer, url) {
             timestamp: Date.now()
         });
         
-        console.log(`💾 Screenshot saved to disk: ${filename}`);
+        logger.debug({
+            event: 'screenshot.saved',
+            filename,
+            token,
+            url
+        }, 'Screenshot saved to disk');
         return token;
     } catch (error) {
         // Don't crash - fall back to base64 encoding
-        console.warn(`⚠️ Failed to save screenshot to disk: ${error.message}`);
-        console.warn(`⚠️ Falling back to base64 encoding for this screenshot`);
+        logger.warn({
+            event: 'screenshot.disk_write_failed',
+            url,
+            error: error.message
+        }, 'Failed to save screenshot to disk, falling back to base64 encoding');
         return null; // Return null to indicate disk save failed
     }
 }
@@ -139,10 +284,16 @@ async function cleanupOldScreenshots() {
         }
         
         if (cleaned > 0) {
-            console.log(`🧹 Cleaned up ${cleaned} old screenshot files`);
+            logger.debug({
+                event: 'screenshot.cleanup',
+                cleanedCount: cleaned
+            }, 'Cleaned up old screenshot files');
         }
     } catch (error) {
-        console.warn(`⚠️ Screenshot cleanup error:`, error.message);
+        logger.warn({
+            event: 'screenshot.cleanup_error',
+            error: error.message
+        }, 'Screenshot cleanup error');
     }
 }
 
@@ -152,19 +303,19 @@ setInterval(cleanupOldScreenshots, 10 * 60 * 1000);
 // Initialize browser
 async function initBrowser() {
     if (!browser) {
-        console.log('[INFO] Initializing Playwright browser...');
+        logger.info({ event: 'browser.init' }, 'Initializing Playwright browser');
         browser = await chromium.launch({
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
-        console.log('[OK] Browser initialized');
+        logger.info({ event: 'browser.ready' }, 'Browser initialized');
     }
     return browser;
 }
 
 // Clean up browser on exit
 process.on('SIGINT', async () => {
-    console.log('\n[WARN] Shutting down...');
+    logger.warn({ event: 'server.shutdown_signal' }, 'Received shutdown signal (SIGINT)');
     if (browser) {
         await browser.close();
     }
@@ -179,13 +330,13 @@ function isCacheValid(timestamp) {
 // Extract text from screenshot using OCR
 async function extractTextFromScreenshot(screenshotBuffer) {
     try {
-        console.log('🔍 Extracting text from screenshot...');
+        logger.debug({ event: 'ocr.start' }, 'Extracting text from screenshot');
         const { data: { text } } = await Tesseract.recognize(screenshotBuffer, 'eng', {
-            logger: m => console.log(`OCR: ${m.status} - ${m.progress * 100}%`)
+            logger: m => logger.debug({ event: 'ocr.progress', status: m.status, progress: m.progress }, 'OCR progress update')
         });
         return text.trim();
     } catch (error) {
-        console.warn('OCR failed:', error.message);
+        logger.warn({ event: 'ocr.error', error: error.message }, 'OCR failed');
         return '';
     }
 }
@@ -235,179 +386,265 @@ function analyzePageContent(text, url) {
 }
 
 // Capture screenshot
-async function captureScreenshot(url) {
-    try {
-        // Check if site is blocked
-        const hostname = new URL(url).hostname;
-        if (blockedSites.has(hostname)) {
-            throw new Error(`Site ${hostname} is currently blocked (bot detection). Will retry in 1 hour.`);
-        }
-        
-        // Check cache
-        const cacheEntry = screenshotCache.get(url);
-        if (cacheEntry && isCacheValid(cacheEntry.timestamp)) {
-            console.log(`📦 Cache hit: ${url}`);
-            return cacheEntry.screenshotUrl || cacheEntry.screenshot; // Support both old base64 and new URL format
-        }
+async function captureScreenshot(url, options = {}) {
+    const { includeDataUri = false } = options;
+    const hostname = getHostFromUrl(url);
+    const captureLogger = logger.child({ scope: 'capture', url, host: hostname });
+    const requestStarted = performance.now();
 
-        console.log(`📸 Capturing screenshot: ${url}`);
-        
-        const browserInstance = await initBrowser();
-        const context = await browserInstance.newContext({
-            viewport: { width: 800, height: 600 }, // Smaller viewport = faster, smaller images
-            deviceScaleFactor: 1, // Reduce quality slightly for speed
-            // Add user agent to avoid bot detection
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            // Add extra HTTP headers
-            extraHTTPHeaders: {
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            }
-        });
-        
-        const page = await context.newPage();
-        
-        // Block unnecessary resources to improve performance and reduce bandwidth
-        // This dramatically reduces page load time by skipping images, fonts, media, and tracking scripts
-        await page.route('**/*', (route) => {
-            const request = route.request();
-            const url = request.url();
-            const resourceType = request.resourceType();
-            
-            // Block images
-            if (resourceType === 'image' || /\.(png|jpg|jpeg|webp|gif|svg|ico)(\?.*)?$/i.test(url)) {
-                return route.abort();
-            }
-            
-            // Block fonts
-            if (resourceType === 'font' || /\.(woff|woff2|ttf|otf|eot)(\?.*)?$/i.test(url)) {
-                return route.abort();
-            }
-            
-            // Block media
-            if (resourceType === 'media' || /\.(mp4|webm|ogg|mp3|wav)(\?.*)?$/i.test(url)) {
-                return route.abort();
-            }
-            
-            // Block common tracking and analytics scripts
-            if (/analytics\.js|gtm\.js|ga\.js|facebook\.net|doubleclick\.net|googletagmanager\.com/i.test(url)) {
-                return route.abort();
-            }
-            
-            // Allow everything else
-            route.continue();
-        });
-        
-        // Set default timeout for page operations
-        page.setDefaultTimeout(25000); // 25 seconds for page operations
-        
-        // Navigate to URL with faster loading strategy
-        await page.goto(url, { 
-            waitUntil: 'domcontentloaded', // Much faster than networkidle
-            timeout: 25000 // 25 seconds - balance between speed and reliability
-        });
-        
-        // Wait a bit for content to render (faster than networkidle)
-        await page.waitForTimeout(1000); // Wait 1s for dynamic content to render
-        
-        // Take screenshot with smaller dimensions
-        const screenshot = await page.screenshot({
-            fullPage: false,
-            type: 'png',
-            clip: { // Crop to specific area if needed
-                x: 0,
-                y: 0,
-                width: 800,
-                height: 600
-            }
-        });
-        
-        // Close context
-        await context.close();
-        
-        // Save screenshot to disk and get token (may return null if disk storage fails)
-        const token = await saveScreenshotToDisk(screenshot, url);
-        
-        // Extract text using OCR
-        const extractedText = await extractTextFromScreenshot(screenshot);
-        
-        // Analyze page content
-        const analysis = analyzePageContent(extractedText, url);
-        
-        // Determine screenshot format: URL if disk storage worked, base64 if it failed
-        let screenshotUrl;
-        let screenshotData;
-        
-        if (token) {
-            // Disk storage succeeded - use URL
-            screenshotUrl = getScreenshotUrl(token);
-        } else {
-            // Disk storage failed - fall back to base64
-            const base64Screenshot = screenshot.toString('base64');
-            screenshotData = `data:image/png;base64,${base64Screenshot}`;
-            screenshotUrl = screenshotData; // Use base64 as URL for backward compatibility
-            console.log(`⚠️ Using base64 encoding (disk storage unavailable)`);
-        }
-        
-        // Cache the result with analysis
-        const newCacheEntry = {
-            screenshotUrl: screenshotUrl,
-            screenshot: screenshotData || null, // Include base64 if available
-            token: token,
-            timestamp: Date.now(),
-            text: extractedText,
-            analysis: analysis
+    captureMetrics.totalRequests += 1;
+
+    if (!hostname) {
+        const error = new Error('Invalid URL');
+        captureLogger.error({ event: 'capture.invalid_url' }, 'Failed to capture screenshot: invalid URL');
+        throw error;
+    }
+
+    if (blockedSites.has(hostname)) {
+        const error = new Error(`Site ${hostname} is currently blocked (bot detection). Will retry in 1 hour.`);
+        error.isBlocked = true;
+        error.retryAfter = `${Math.round(BLOCKED_TTL / 1000)}s`;
+        captureLogger.warn({ event: 'capture.blocked_host' }, 'Host is temporarily blocked due to prior 403/timeout');
+        throw error;
+    }
+
+    if (isCircuitOpen(hostname)) {
+        const circuitError = createCircuitOpenError(hostname);
+        captureLogger.warn({
+            event: 'capture.circuit_open',
+            retryAfter: circuitError.retryAfter
+        }, 'Circuit breaker open for host');
+        throw circuitError;
+    }
+
+    const cacheEntry = screenshotCache.get(url);
+    if (cacheEntry && isCacheValid(cacheEntry.timestamp) && (!includeDataUri || cacheEntry.dataUri)) {
+        captureLogger.debug({ event: 'capture.cache_hit' }, 'Returning cached screenshot');
+        const responsePayload = {
+            screenshotUrl: includeDataUri && cacheEntry.dataUri ? cacheEntry.dataUri : cacheEntry.screenshotUrl,
+            dataUri: cacheEntry.dataUri || null,
+            analysis: cacheEntry.analysis || null,
+            text: cacheEntry.text || '',
+            originalUrl: cacheEntry.screenshotUrl
         };
-        
-        screenshotCache.set(url, newCacheEntry);
-        pageAnalysisCache.set(url, analysis);
-        
-        console.log(`✅ Screenshot captured: ${url}`);
-        if (token) {
-            console.log(`📸 Screenshot URL: ${screenshotUrl}`);
-        } else {
-            console.log(`📸 Screenshot encoded as base64 (${screenshotData.length} chars)`);
-        }
-        console.log(`📊 Page type: ${analysis.pageType} (confidence: ${Math.round(analysis.confidence * 100)}%)`);
-        console.log(`🔍 Key topics: ${analysis.keyTopics.join(', ') || 'none'}`);
-        
-        return screenshotUrl;
-        
-        } catch (error) {
-            console.error(`❌ Error capturing screenshot for ${url}:`, error.message);
-            
-            // Create a more specific error with better messaging
-            let enhancedError = error;
-            const hostname = new URL(url).hostname;
-            
-            // Check if it's a timeout or navigation error
-            if (error.message.includes('Navigation') || 
-                error.message.includes('timeout') || 
-                error.message.includes('Timeout')) {
-                console.warn(`   ⏱️ Page load timeout - this site may be slow, blocking bots, or have strict security`);
-                enhancedError = new Error(`Page load timeout: ${hostname} took too long to load. The site may be slow, blocking automated access, or require authentication.`);
-                enhancedError.isTimeout = true;
+        return responsePayload;
+    }
+
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= MAX_CAPTURE_ATTEMPTS; attempt++) {
+        const attemptLogger = captureLogger.child({ attempt, maxAttempts: MAX_CAPTURE_ATTEMPTS });
+        let context;
+        const attemptStart = performance.now();
+
+        try {
+            attemptLogger.info({ event: 'capture.attempt' }, 'Attempting screenshot capture');
+
+            const browserInstance = await initBrowser();
+            context = await browserInstance.newContext({
+                viewport: { width: 800, height: 600 },
+                deviceScaleFactor: 1,
+                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                extraHTTPHeaders: {
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+                }
+            });
+
+            const page = await context.newPage();
+
+            await page.route('**/*', (route) => {
+                const request = route.request();
+                const resourceType = request.resourceType();
+                const requestUrl = request.url();
+
+                if (resourceType === 'image' || /\.(png|jpg|jpeg|webp|gif|svg|ico)(\?.*)?$/i.test(requestUrl)) {
+                    return route.abort();
+                }
+
+                if (resourceType === 'font' || /\.(woff|woff2|ttf|otf|eot)(\?.*)?$/i.test(requestUrl)) {
+                    return route.abort();
+                }
+
+                if (resourceType === 'media' || /\.(mp4|webm|ogg|mp3|wav)(\?.*)?$/i.test(requestUrl)) {
+                    return route.abort();
+                }
+
+                if (/analytics\.js|gtm\.js|ga\.js|facebook\.net|doubleclick\.net|googletagmanager\.com/i.test(requestUrl)) {
+                    return route.abort();
+                }
+
+                route.continue();
+            });
+
+            page.setDefaultTimeout(25000);
+
+            await page.goto(url, {
+                waitUntil: 'domcontentloaded',
+                timeout: 25000
+            });
+
+            await page.waitForTimeout(1000);
+
+            const screenshot = await page.screenshot({
+                fullPage: false,
+                type: 'png',
+                clip: {
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600
+                }
+            });
+
+            const token = await saveScreenshotToDisk(screenshot, url);
+            const diskScreenshotUrl = token ? getScreenshotUrl(token) : null;
+            const extractedText = await extractTextFromScreenshot(screenshot);
+            const analysis = analyzePageContent(extractedText, url);
+
+            const base64Screenshot = screenshot.toString('base64');
+            const dataUri = `data:image/png;base64,${base64Screenshot}`;
+
+            let screenshotUrl;
+
+            if (diskScreenshotUrl) {
+                screenshotUrl = diskScreenshotUrl;
+            } else {
+                screenshotUrl = dataUri;
+                attemptLogger.warn({ event: 'capture.fallback_base64' }, 'Using base64 encoding because disk storage is unavailable');
             }
-            
-            // Check if it's a 403/404/500 server error - mark as blocked
-            if (error.message.includes('403') || 
-                error.message.includes('404') || 
-                error.message.includes('500') || 
-                error.message.includes('Internal Server Error') ||
-                error.message.includes('net::ERR_BLOCKED_BY_CLIENT')) {
+
+            const newCacheEntry = {
+                screenshotUrl: screenshotUrl,
+                dataUri: dataUri,
+                originalUrl: diskScreenshotUrl || screenshotUrl,
+                token: token,
+                timestamp: Date.now(),
+                text: extractedText,
+                analysis: analysis
+            };
+
+            screenshotCache.set(url, newCacheEntry);
+            pageAnalysisCache.set(url, analysis);
+
+            recordCircuitSuccess(hostname);
+            blockedSites.delete(hostname);
+
+            const attemptDuration = performance.now() - attemptStart;
+            const totalDuration = performance.now() - requestStarted;
+
+            captureMetrics.successfulRequests += 1;
+            if (captureMetrics.successfulRequests === 1) {
+                captureMetrics.averageDurationMs = attemptDuration;
+            } else {
+                captureMetrics.averageDurationMs = (
+                    (captureMetrics.averageDurationMs * (captureMetrics.successfulRequests - 1)) + attemptDuration
+                ) / captureMetrics.successfulRequests;
+            }
+
+            attemptLogger.info({
+                event: 'capture.success',
+                durationMs: Math.round(attemptDuration),
+                totalDurationMs: Math.round(totalDuration),
+                token,
+                usedBase64: !token,
+                includeDataUri,
+                analysis
+            }, 'Screenshot captured successfully');
+
+            const finalResponseUrl = includeDataUri ? dataUri : screenshotUrl;
+            const responsePayload = {
+                screenshotUrl: finalResponseUrl,
+                dataUri: dataUri,
+                analysis,
+                text: extractedText,
+                originalUrl: diskScreenshotUrl || screenshotUrl
+            };
+
+            return responsePayload;
+        } catch (error) {
+            lastError = error;
+            const retryable = isRetryableError(error);
+
+            if (error.message?.includes('Navigation') || error.message?.includes('timeout')) {
+                error.isTimeout = true;
+            }
+
+            if (error.message?.includes('403') ||
+                error.message?.includes('404') ||
+                error.message?.includes('500') ||
+                error.message?.includes('Internal Server Error') ||
+                error.message?.includes('net::ERR_BLOCKED_BY_CLIENT')) {
+                error.isBlocked = true;
+            }
+
+            recordCircuitFailure(hostname, {
+                forceOpen: !retryable || error.isBlocked,
+                cooldownMs: error.isBlocked ? CIRCUIT_BREAKER_BLOCK_MS : undefined
+            });
+
+            if (error.isBlocked) {
                 blockedSites.add(hostname);
-                console.warn(`   🚫 Server blocked this request - will skip for 1 hour`);
-                enhancedError.isBlocked = true;
-                
-                // Auto-clear blocked sites after 1 hour
                 setTimeout(() => {
                     blockedSites.delete(hostname);
-                    console.log(`   ✅ Unblocked ${hostname} after cooldown`);
+                    logger.info({ event: 'capture.block_reset', host: hostname }, 'Host block reset after cooldown');
                 }, BLOCKED_TTL);
             }
-            
-            throw enhancedError;
+
+            attemptLogger.warn({
+                event: 'capture.failure',
+                error: error.message,
+                retryable,
+                isTimeout: !!error.isTimeout,
+                isBlocked: !!error.isBlocked
+            }, 'Capture attempt failed');
+
+            if (attempt < MAX_CAPTURE_ATTEMPTS && retryable) {
+                const delay = CAPTURE_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+                attemptLogger.info({
+                    event: 'capture.retry',
+                    delayMs: delay
+                }, 'Retrying capture after delay');
+                await sleep(delay);
+                continue;
+            }
+
+            break;
+        } finally {
+            if (context) {
+                await context.close().catch(closeError => {
+                    attemptLogger.warn({
+                        event: 'capture.context_close_error',
+                        error: closeError.message
+                    }, 'Failed to close Playwright context cleanly');
+                });
+            }
         }
+    }
+
+    captureMetrics.failedRequests += 1;
+    captureMetrics.lastFailureAt = new Date().toISOString();
+
+    const totalDurationMs = performance.now() - requestStarted;
+    const circuitState = getCircuit(hostname);
+    const retryAfterSeconds = circuitState?.nextAttemptAt ? Math.ceil((circuitState.nextAttemptAt - Date.now()) / 1000) : undefined;
+
+    captureLogger.error({
+        event: 'capture.give_up',
+        totalAttempts: MAX_CAPTURE_ATTEMPTS,
+        durationMs: Math.round(totalDurationMs),
+        retryAfterSeconds,
+        error: lastError ? lastError.message : 'Unknown error'
+    }, 'Failed to capture screenshot after retries');
+
+    if (lastError) {
+        if (retryAfterSeconds) {
+            lastError.retryAfter = `${retryAfterSeconds}s`;
+        }
+        throw lastError;
+    }
+
+    throw new Error('Failed to capture screenshot');
 }
 
 // Routes
@@ -433,7 +670,7 @@ app.get('/screenshot/:token', async (req, res) => {
         // Look up token
         const tokenData = screenshotTokens.get(token);
         if (!tokenData) {
-            console.warn(`[SCREENSHOT] Token not found: ${token}`);
+            logger.warn({ event: 'screenshot.token_missing', token }, 'Screenshot token not found');
             return res.status(404).json({
                 error: 'Screenshot not found',
                 message: 'Screenshot token is invalid or has expired'
@@ -450,7 +687,7 @@ app.get('/screenshot/:token', async (req, res) => {
                 fileStats = await fs.stat(filepath);
             } catch (statError) {
                 // File doesn't exist - clean up and return 404
-                console.warn(`[SCREENSHOT] File not found: ${filepath}`);
+                logger.warn({ event: 'screenshot.file_missing', filepath, token }, 'Screenshot file missing');
                 screenshotTokens.delete(token);
                 return res.status(404).json({
                     error: 'Screenshot file not found',
@@ -462,7 +699,7 @@ app.get('/screenshot/:token', async (req, res) => {
             const age = Date.now() - fileStats.mtimeMs;
             if (age > CACHE_TTL) {
                 // Clean up expired file
-                console.log(`[SCREENSHOT] File expired, cleaning up: ${token}`);
+                logger.info({ event: 'screenshot.expired', token }, 'Cleaning up expired screenshot file');
                 await fs.unlink(filepath).catch(() => {});
                 screenshotTokens.delete(token);
                 return res.status(404).json({
@@ -482,10 +719,10 @@ app.get('/screenshot/:token', async (req, res) => {
                 
                 // Send file
                 res.send(fileContent);
-                console.log(`[SCREENSHOT] Served file: ${token} (${fileContent.length} bytes)`);
+                logger.debug({ event: 'screenshot.served', token, bytes: fileContent.length }, 'Served screenshot file');
                 
             } catch (readError) {
-                console.error(`[SCREENSHOT] Error reading file ${filepath}:`, readError.message);
+                logger.error({ event: 'screenshot.read_error', filepath, token, error: readError.message }, 'Error reading screenshot file');
                 screenshotTokens.delete(token);
                 return res.status(500).json({
                     error: 'Failed to read screenshot file',
@@ -494,7 +731,7 @@ app.get('/screenshot/:token', async (req, res) => {
             }
             
         } catch (error) {
-            console.error(`[SCREENSHOT] Error serving screenshot ${token}:`, error.message);
+            logger.error({ event: 'screenshot.serve_error', token, error: error.message }, 'Error serving screenshot token');
             screenshotTokens.delete(token);
             return res.status(404).json({
                 error: 'Screenshot file not found',
@@ -503,7 +740,7 @@ app.get('/screenshot/:token', async (req, res) => {
         }
         
     } catch (error) {
-        console.error('[SCREENSHOT] Screenshot serve error:', error.message);
+        logger.error({ event: 'screenshot.route_error', error: error.message }, 'Screenshot route error');
         res.status(500).json({
             error: 'Failed to serve screenshot',
             message: error.message
@@ -514,6 +751,7 @@ app.get('/screenshot/:token', async (req, res) => {
 app.post('/capture', async (req, res) => {
     try {
         const { url } = req.body;
+        const preferDataUri = !!(req.body?.preferDataUri || req.body?.includeDataUri || req.body?.format === 'data-uri');
         
         if (!url) {
             return res.status(400).json({
@@ -532,17 +770,20 @@ app.post('/capture', async (req, res) => {
             });
         }
         
-        // Capture screenshot (returns URL now, not base64)
-        const screenshot = await captureScreenshot(url);
+        // Capture screenshot (optionally include data URI)
+        const captureResult = await captureScreenshot(url, { includeDataUri: preferDataUri });
         
-        // Send response - screenshot is now a URL, not base64
-        res.json({ 
-            screenshot: screenshot,
-            screenshotUrl: screenshot // Explicit field for clarity
+        res.json({
+            screenshot: preferDataUri ? (captureResult.dataUri || captureResult.screenshotUrl) : captureResult.screenshotUrl,
+            screenshotUrl: captureResult.screenshotUrl,
+            screenshotDataUri: captureResult.dataUri || null,
+            originalScreenshotUrl: captureResult.originalUrl || captureResult.screenshotUrl,
+            analysis: captureResult.analysis || null,
+            text: captureResult.text || ''
         });
         
     } catch (error) {
-        console.error('❌ Capture error:', error.message);
+        logger.error({ event: 'route.capture_error', error: error.message, url }, 'Capture endpoint error');
         
         // Return appropriate HTTP status codes
         let statusCode = 500;
@@ -593,7 +834,7 @@ app.get('/analyze/:url', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('❌ Analysis error:', error.message);
+        logger.error({ event: 'route.analyze_error', error: error.message, url: req.params.url }, 'Analyze endpoint error');
         res.status(500).json({
             error: 'Failed to get analysis',
             message: error.message
@@ -624,20 +865,22 @@ app.post('/context', async (req, res) => {
             });
         }
         
-        console.log(`📸 [CONTEXT] Capturing screenshot and generating analysis for: ${url}`);
+        const preferDataUri = !!(req.body?.preferDataUri || req.body?.includeDataUri || req.body?.format === 'data-uri');
+        logger.info({ event: 'context.capture_start', url, preferDataUri }, 'Context request started');
         
         // Check cache first - if we have both screenshot and analysis, return immediately
         const cacheEntry = screenshotCache.get(url);
         const analysis = pageAnalysisCache.get(url);
         
         if (cacheEntry && isCacheValid(cacheEntry.timestamp) && analysis) {
-            console.log(`📦 [CONTEXT] Cache hit: ${url}`);
-            // Return URL if available, otherwise base64 (backward compatibility)
-            const screenshot = cacheEntry.screenshotUrl || cacheEntry.screenshot;
+            logger.debug({ event: 'context.cache_hit', url }, 'Returning cached context');
+            const screenshotCandidate = preferDataUri && cacheEntry.dataUri ? cacheEntry.dataUri : cacheEntry.screenshotUrl;
             return res.json({
                 url: url,
-                screenshot: screenshot,
-                screenshotUrl: cacheEntry.screenshotUrl || null, // New field for URL
+                screenshot: screenshotCandidate,
+                screenshotUrl: screenshotCandidate,
+                originalScreenshotUrl: cacheEntry.screenshotUrl || null,
+                screenshotDataUri: cacheEntry.dataUri || null,
                 analysis: analysis,
                 text: cacheEntry.text || '',
                 cached: true,
@@ -646,33 +889,38 @@ app.post('/context', async (req, res) => {
         }
         
         // Capture screenshot (this also generates analysis internally)
-        const screenshotUrl = await captureScreenshot(url);
+        const captureResult = await captureScreenshot(url, { includeDataUri: preferDataUri });
         
         // Get the fresh analysis from cache (captureScreenshot updates both caches)
         const freshAnalysis = pageAnalysisCache.get(url);
         const freshCacheEntry = screenshotCache.get(url);
         
-        console.log(`✅ [CONTEXT] Screenshot and analysis ready for: ${url}`);
-        console.log(`📊 [CONTEXT] Page type: ${freshAnalysis?.pageType || 'unknown'}`);
+        logger.info({
+            event: 'context.capture_success',
+            url,
+            pageType: freshAnalysis?.pageType || 'unknown'
+        }, 'Context capture successful');
         
         // Send response with both screenshot URL and analysis
         res.json({
             url: url,
-            screenshot: screenshotUrl, // URL instead of base64
-            screenshotUrl: screenshotUrl, // Explicit URL field
+            screenshot: preferDataUri ? (captureResult.dataUri || captureResult.screenshotUrl) : captureResult.screenshotUrl,
+            screenshotUrl: preferDataUri ? (captureResult.dataUri || captureResult.screenshotUrl) : captureResult.screenshotUrl,
+            originalScreenshotUrl: captureResult.originalUrl || captureResult.screenshotUrl,
+            screenshotDataUri: captureResult.dataUri || null,
             analysis: freshAnalysis || {
                 pageType: 'unknown',
                 keyTopics: [],
                 suggestedActions: [],
                 confidence: 0
             },
-            text: freshCacheEntry?.text || '',
+            text: freshCacheEntry?.text || captureResult.text || '',
             cached: false,
             timestamp: new Date().toISOString()
         });
         
     } catch (error) {
-        console.error('❌ [CONTEXT] Error:', error.message);
+        logger.error({ event: 'context.capture_error', url, error: error.message }, 'Context endpoint error');
         
         // Return appropriate HTTP status codes
         let statusCode = 500;
@@ -703,53 +951,45 @@ app.post('/context', async (req, res) => {
 
 // Chat endpoint (REST - maintained for backward compatibility)
 app.post('/chat', async (req, res) => {
-    console.log('🚨 CHAT ENDPOINT CALLED!');
+    const requestId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(8).toString('hex');
+    const chatLogger = logger.child({ scope: 'chat', requestId });
+    chatLogger.info({ event: 'chat.request_received' }, 'Chat endpoint called');
     try {
-        console.log('📨 Chat request received:', {
-            body: req.body,
-            headers: req.headers,
-            method: req.method
-        });
+        chatLogger.debug({ event: 'chat.payload', headers: req.headers, method: req.method }, 'Chat request metadata received');
         
         const { message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs } = req.body;
         const actualUrl = currentUrl || url;
         
-        console.log('🔍 URL parsing:', { currentUrl, url, actualUrl });
+        chatLogger.debug({ event: 'chat.url_parsed', currentUrl, url, actualUrl }, 'Parsed chat URL fields');
         
         if (!message) {
-            console.log('❌ Missing message parameter');
+            chatLogger.warn({ event: 'chat.validation_error' }, 'Missing message parameter');
             return res.status(400).json({
                 error: 'Missing message parameter',
                 message: 'Please provide a message in the request body: { "message": "Hello" }'
             });
         }
         
-        console.log(`[CHAT] Message: ${message}`);
-        console.log(`[KEY] From request: ${openaiKey ? 'YES (' + openaiKey.substring(0, 10) + '...)' : 'NO'}`);
-        console.log(`[KEY] From env: ${process.env.OPENAI_API_KEY ? 'YES (' + process.env.OPENAI_API_KEY.substring(0, 10) + '...)' : 'NO - KEY NOT SET'}`);
-        console.log(`[URL] Current: ${actualUrl || 'none'}`);
-        
-        // Log full key status for debugging (first few chars only)
-        if (process.env.OPENAI_API_KEY) {
-            console.log(`[OK] Backend has OpenAI API key configured (length: ${process.env.OPENAI_API_KEY.length} chars)`);
-        } else {
-            console.log(`[WARN] Backend OPENAI_API_KEY environment variable is NOT set!`);
-            console.log(`       To set it: export OPENAI_API_KEY=sk-... (or configure in ECS task definition)`);
-        }
+        chatLogger.info({
+            event: 'chat.request_details',
+            hasUserKey: !!openaiKey,
+            hasBackendKey: !!process.env.OPENAI_API_KEY,
+            url: actualUrl || 'none'
+        }, 'Chat message received');
         
         // Use shared chat processing function
-        const result = await processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs);
+        const result = await processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs, chatLogger);
         
         res.json(result);
         
-        console.log('[OK] Chat response sent:', {
-            response: result.response.substring(0, 100) + '...',
-            timestamp: result.timestamp,
-            hasContext: !!result.context
-        });
+        chatLogger.info({
+            event: 'chat.response_sent',
+            hasContext: !!result.context,
+            timestamp: result.timestamp
+        }, 'Chat response sent');
         
     } catch (error) {
-        console.error('[ERROR] Chat error:', error.message);
+        chatLogger.error({ event: 'chat.error', error: error.message }, 'Chat endpoint error');
         res.status(500).json({
             error: 'Failed to process chat message',
             message: error.message
@@ -759,7 +999,8 @@ app.post('/chat', async (req, res) => {
 
   // OCR Upload endpoint
   app.post("/ocr-upload", async (req, res) => {
-      console.log("📸 OCR Upload endpoint called");
+      const ocrLogger = logger.child({ scope: 'ocr.upload' });
+      ocrLogger.info({ event: 'ocr.upload_received' }, 'OCR upload endpoint called');
       try {
           const { image } = req.body;
           if (!image) {
@@ -769,7 +1010,7 @@ app.post('/chat', async (req, res) => {
               });
           }
           
-          console.log("🔍 Processing OCR on uploaded image...");
+          ocrLogger.debug({ event: 'ocr.upload_processing' }, 'Processing OCR on uploaded image');
           
           // Extract base64 data from data URL if present
           let base64Data = image;
@@ -784,7 +1025,7 @@ app.post('/chat', async (req, res) => {
           // Extract text using OCR
           const extractedText = await extractTextFromScreenshot(imageBuffer);
           
-          console.log(`✅ OCR completed. Extracted ${extractedText.length} characters`);
+          ocrLogger.info({ event: 'ocr.upload_success', characterCount: extractedText.length }, 'OCR upload completed');
           
           res.json({ 
               text: extractedText,
@@ -792,7 +1033,7 @@ app.post('/chat', async (req, res) => {
               characterCount: extractedText.length
           });
       } catch (error) {
-          console.error("❌ OCR Upload error:", error);
+          ocrLogger.error({ event: 'ocr.upload_error', error: error.message }, 'OCR upload error');
           res.status(500).json({ 
               error: "OCR processing failed",
               message: error.message
@@ -820,13 +1061,29 @@ app.get('/health', (req, res) => {
             openaiKeyConfigured: !!(process.env.OPENAI_API_KEY),
             openaiKeyLength: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0,
             openaiKeyPrefix: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.substring(0, 7) + '...' : 'not set'
+        },
+        metrics: {
+            capture: {
+                totalRequests: captureMetrics.totalRequests,
+                successfulRequests: captureMetrics.successfulRequests,
+                failedRequests: captureMetrics.failedRequests,
+                averageDurationMs: Math.round(captureMetrics.averageDurationMs),
+                lastFailureAt: captureMetrics.lastFailureAt
+            }
+        },
+        resilience: {
+            maxCaptureAttempts: MAX_CAPTURE_ATTEMPTS,
+            captureBaseDelayMs: CAPTURE_BASE_DELAY_MS,
+            circuitBreakerThreshold: CIRCUIT_BREAKER_THRESHOLD,
+            circuitBreakerCooldownMs: CIRCUIT_BREAKER_COOLDOWN_MS,
+            openCircuits: getCircuitSnapshot()
         }
     });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-    console.error('❌ Server error:', err.message);
+    logger.error({ event: 'server.error', error: err.message, stack: err.stack }, 'Unhandled server error');
     
     if (err.type === 'entity.too.large') {
         return res.status(413).json({
@@ -844,7 +1101,8 @@ app.use((err, req, res, next) => {
 });
 
 // Extract chat logic into reusable function
-async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs) {
+async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs, requestLogger = logger) {
+    const chatLogger = requestLogger?.child ? requestLogger.child({ event_scope: 'chat.processor' }) : logger.child({ event_scope: 'chat.processor' });
     const actualUrl = currentUrl || url;
     
     // Get context from current page if available
@@ -859,15 +1117,16 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
     // Use OpenAI key from request if provided, otherwise use backend's default key
     const apiKeyToUse = (openaiKey && openaiKey.trim()) ? openaiKey.trim() : (process.env.OPENAI_API_KEY || '');
     
-    console.log('[KEY] API Key check:', {
+    chatLogger.debug({
+        event: 'chat.api_key_check',
         userProvided: !!(openaiKey && openaiKey.trim()),
         backendKey: !!(process.env.OPENAI_API_KEY),
-        keyToUse: apiKeyToUse ? `${apiKeyToUse.substring(0, 10)}...` : 'NONE'
-    });
+        keyPreview: apiKeyToUse ? `${apiKeyToUse.substring(0, 10)}...` : 'NONE'
+    }, 'Evaluated API key sources');
     
     // Check if we have an OpenAI key to use
     if (apiKeyToUse) {
-        console.log('[INFO] Using OpenAI API for chat response');
+        chatLogger.info({ event: 'chat.openai_call' }, 'Calling OpenAI API for chat response');
         try {
             // Prepare messages for OpenAI
             const messages = [
@@ -911,16 +1170,15 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
                 source: 'openai'
             };
         } catch (error) {
-            console.error('❌ OpenAI API error:', error.message);
-            console.error('❌ OpenAI API error details:', {
-                status: error.status,
+            chatLogger.error({
+                event: 'chat.openai_error',
                 message: error.message,
-                stack: error.stack
-            });
+                status: error.status
+            }, 'OpenAI API error');
             // Fall through to basic response
         }
     } else {
-        console.log('[WARN] No OpenAI API key available - using fallback response');
+        chatLogger.warn({ event: 'chat.fallback_no_key' }, 'No OpenAI key available, using fallback response');
     }
     
     // Generate a basic helpful response (fallback)
@@ -955,8 +1213,8 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
 // Initialize MCP Server
 const mcpServer = new MCPServer(
     // captureHandler
-    async (url) => {
-        return await captureScreenshot(url);
+    async (url, options = {}) => {
+        return await captureScreenshot(url, options);
     },
     // chatHandler
     async ({ message, currentUrl, openaiKey, tooltipHistory }) => {
@@ -967,7 +1225,8 @@ const mcpServer = new MCPServer(
             openaiKey,
             tooltipHistory,
             null, // pageInfo
-            null  // consoleLogs
+            null,  // consoleLogs
+            logger.child({ scope: 'chat.mcp' })
         );
     },
     // ocrHandler
@@ -999,19 +1258,21 @@ const mcpServer = new MCPServer(
 
 // MCP endpoint - JSON-RPC 2.0 over HTTP POST
 app.post('/mcp', async (req, res) => {
+    const mcpLogger = logger.child({ scope: 'mcp' });
     try {
         const request = req.body;
         
-        console.log('[MCP] Endpoint called:', {
+        mcpLogger.debug({
+            event: 'mcp.request_received',
             method: request.method,
             id: request.id,
             hasParams: !!request.params,
             jsonrpc: request.jsonrpc
-        });
+        }, 'MCP endpoint called');
         
         // Validate JSON-RPC 2.0 request
         if (request.jsonrpc !== '2.0') {
-            console.error('[ERROR] MCP: Invalid jsonrpc version:', request.jsonrpc);
+            mcpLogger.error({ event: 'mcp.invalid_version', jsonrpc: request.jsonrpc }, 'Invalid MCP jsonrpc version');
             return res.status(400).json({
                 jsonrpc: '2.0',
                 id: request.id || null,
@@ -1026,26 +1287,27 @@ app.post('/mcp', async (req, res) => {
         // Handle JSON-RPC 2.0 request
         const response = await mcpServer.handleRequest(request);
         
-        console.log('[MCP] Request handled, response:', {
+        mcpLogger.debug({
+            event: 'mcp.response_ready',
             hasError: !!response?.error,
             hasResult: !!response?.result,
             isNotification: response === null
-        });
+        }, 'MCP request handled');
         
         // Notifications don't return responses
         if (response === null) {
-            console.log('[MCP] Notification received (no response)');
+            mcpLogger.debug({ event: 'mcp.notification' }, 'MCP notification received (no response)');
             return res.status(204).send(); // No Content
         }
         
         res.json(response);
     } catch (error) {
-        console.error('[ERROR] MCP endpoint error:', error);
-        console.error('[ERROR] MCP endpoint error details:', {
+        mcpLogger.error({
+            event: 'mcp.error',
             message: error.message,
             stack: error.stack?.substring(0, 300),
             requestId: req.body?.id
-        });
+        }, 'MCP endpoint error');
         res.status(500).json({
             jsonrpc: '2.0',
             id: req.body?.id || null,
@@ -1075,27 +1337,24 @@ async function start() {
     await initBrowser();
     
     app.listen(PORT, () => {
-        console.log('\n===================================================');
-        console.log('Playwright Tooltip Backend Service');
-        console.log('===================================================');
-        console.log(`Server running on http://localhost:${PORT}`);
-        console.log(`Endpoint: POST http://localhost:${PORT}/capture`);
-        console.log(`Context: POST http://localhost:${PORT}/context`);
-        console.log(`Screenshots: GET http://localhost:${PORT}/screenshot/:token`);
-        console.log(`MCP Endpoint: POST http://localhost:${PORT}/mcp`);
-        console.log(`Health: GET http://localhost:${PORT}/health`);
-        console.log('===================================================\n');
-        console.log('REST API: POST /capture with { "url": "..." }');
-        console.log('Context API: POST /context with { "url": "..." }');
-        console.log('MCP Protocol: POST /mcp with JSON-RPC 2.0');
-        console.log(`Screenshot storage: ${SCREENSHOT_DIR}`);
-        console.log('\nWaiting for requests...\n');
+        logger.info({
+            event: 'server.started',
+            port: PORT,
+            endpoints: {
+                capture: '/capture',
+                context: '/context',
+                screenshot: '/screenshot/:token',
+                mcp: '/mcp',
+                health: '/health'
+            },
+            screenshotDir: SCREENSHOT_DIR
+        }, 'Playwright Tooltip Backend Service started');
     });
 }
 
 // Start the server
 start().catch(error => {
-    console.error('[ERROR] Failed to start server:', error);
+    logger.error({ event: 'server.start_error', error: error.message, stack: error.stack }, 'Failed to start server');
     process.exit(1);
 });
 

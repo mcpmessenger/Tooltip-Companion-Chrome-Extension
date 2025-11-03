@@ -227,12 +227,12 @@ class MCPClient {
      * @param {string} uri - Resource URI
      * @returns {Promise<Object>} Resource data
      */
-    async readResource(uri) {
+    async readResource(uri, options = {}) {
         if (!this.initialized) {
             await this.initialize();
         }
 
-        return await this.call('resources/read', { uri });
+        return await this.call('resources/read', { uri, options });
     }
 
     /**
