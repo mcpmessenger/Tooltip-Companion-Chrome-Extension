@@ -13,7 +13,7 @@ Operation **Juicebox 🧃** is the multi-phase initiative to raise the Tooltip C
 
 | Phase | Theme | Current Focus | Status |
 | :--- | :--- | :--- | :--- |
-| Phase 1 | Backend Stabilization & Observability | Deploy CloudWatch alarms, ECS capacity review | 🚧 In progress |
+| Phase 1 | Backend Stabilization & Observability | Ready for backend deployment | ✅ Complete |
 | Phase 2 | Reliability & Compatibility | Secure screenshot endpoint (signed URLs), security hardening | 🚧 In progress |
 | Phase 3 | QA & Automation | Tests, CI/CD, staging parity | ⏳ Next |
 | Phase 4 | Documentation & Strategy | Ops guide, architecture, telemetry roadmap | ⏳ Scheduled |
@@ -22,24 +22,27 @@ Operation **Juicebox 🧃** is the multi-phase initiative to raise the Tooltip C
 
 ### Objectives
 
-- [ ] **Automated Health Signals**: Define CloudWatch alarms for ECS service (CPU, memory, 5XX rate). Ship infrastructure scaffolding in `infra/`.
+- [x] **Automated Health Signals**: Deploy CloudWatch alarms for ECS service (CPU, memory, 5XX rate). Infrastructure scaffolding in `infra/` with automated deployment script.
 - [x] **Log Aggregation**: Adopt structured logging in `playwright_service` and document CloudWatch Logs Insights queries.
 - [x] **Resilience Patterns**: Add retry with exponential backoff and host-level circuit breaking for upstream navigation calls.
-- [ ] **ECS Capacity Review**: Document current task sizing, create checklist for memory/CPU tuning.
+- [x] **ECS Capacity Review**: Reviewed current configuration. Findings: desired count = 1 (should be >= 2), health check grace period = 40s (should be >= 60s), no auto scaling configured. Review script available in `infra/operation-juicebox/review-ecs-capacity.ps1`.
 
 ### Deliverables (in repo)
 
 - `infra/operation-juicebox/` (CloudWatch alarm templates & IaC scaffolding)
+- `infra/operation-juicebox/deploy-alarms.ps1` - Automated alarm deployment script
+- `infra/operation-juicebox/review-ecs-capacity.ps1` - ECS capacity review script
 - Structured logging utilities in `playwright_service/logger.js`
 - Updated `playwright_service/server.js` resilience logic
 - Documentation updates: `README.md`, `docs/BACKEND_SETUP.md`, `docs/OPERATION_JUICEBOX.md` (this file)
 
 ### Verification
 
-- Logs show JSON-formatted entries with correlation fields
-- `/health` exposes retry/circuit-breaker telemetry
-- New alarms documented with deployment instructions
-- README highlights Operation Juicebox status and backend hardening steps
+- ✅ Logs show JSON-formatted entries with correlation fields
+- ✅ `/health` exposes retry/circuit-breaker telemetry
+- ✅ CloudWatch alarms deployed (CPU, Memory, 5XX, Healthy Hosts)
+- ✅ Alarms automatically discover ALB/TargetGroup dimensions
+- ✅ README highlights Operation Juicebox status and backend hardening steps
 
 ## Phase 2 — Reliability & Compatibility
 
@@ -91,12 +94,13 @@ Operation **Juicebox 🧃** is the multi-phase initiative to raise the Tooltip C
 | 2025-11-03 | Added CSP-aware data URI fallback for strict sites | `playwright_service/server.js`, `background.js`, `content.js` |
 | 2025-11-03 | Fixed Buffer normalization & MCP CSP support | `content.js`, `playwright_service/mcp-server.js`, `mcp-client.js`, `background.js` |
 | 2025-11-03 | Created `operation-juicebox-v1.5` branch with Phase 1 & Phase 2 CSP fixes | Branch pushed to GitHub |
+| 2025-11-03 | Deployed CloudWatch alarms & completed ECS capacity review | `infra/operation-juicebox/deploy-alarms.ps1`, `review-ecs-capacity.ps1`, CloudFormation stack created |
 
 ## Next Actions
 
-1. **Deploy backend to production** - Push resilience patterns + CSP fallback to ECS
-2. **Complete Phase 1** - Deploy CloudWatch alarms and review ECS capacity
-3. **Continue Phase 2** - Implement signed URLs for `/screenshot/:token` security
+1. **Deploy backend to production** - Push resilience patterns + CSP fallback to ECS (Phase 1 complete, alarms deployed)
+2. **Continue Phase 2** - Implement signed URLs for `/screenshot/:token` security
+3. **Address ECS capacity findings** - Increase desired count to 2+, extend health check grace period to 60s+
 4. **Start Phase 3** - Set up automated testing and CI/CD pipeline
 
 
