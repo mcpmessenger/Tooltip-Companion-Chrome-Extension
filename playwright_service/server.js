@@ -6,6 +6,9 @@ const { chromium } = require('playwright');
 const cors = require('cors');
 const Tesseract = require('tesseract.js');
 const MCPServer = require('./mcp-server');
+const crypto = require('crypto');
+const fs = require('fs').promises;
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -44,8 +47,107 @@ let browser = null;
 let screenshotCache = new Map();
 let pageAnalysisCache = new Map(); // Cache for page analysis
 let blockedSites = new Set(); // Track sites that blocked us
+let screenshotTokens = new Map(); // Map token -> filepath for signed URLs
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const BLOCKED_TTL = 60 * 60 * 1000; // Don't retry blocked sites for 1 hour
+
+// Screenshot storage configuration
+const SCREENSHOT_DIR = process.env.SCREENSHOT_DIR || path.join(process.cwd(), 'tmp', 'screenshots');
+const SCREENSHOT_URL_BASE = process.env.SCREENSHOT_URL_BASE || ''; // Base URL for screenshots (set to backend URL in production)
+
+// Ensure screenshot directory exists (non-blocking - won't crash server if it fails)
+async function ensureScreenshotDir() {
+    try {
+        await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+        console.log(`[OK] Screenshot directory ready: ${SCREENSHOT_DIR}`);
+        return true;
+    } catch (error) {
+        // Log warning but don't crash - fall back to base64 if needed
+        console.warn(`[WARN] Failed to create screenshot directory: ${error.message}`);
+        console.warn(`[WARN] Screenshots will use base64 encoding instead of file storage`);
+        return false;
+    }
+}
+
+// Generate secure token for screenshot
+function generateScreenshotToken(url) {
+    const hash = crypto.createHash('sha256');
+    hash.update(url + Date.now().toString());
+    return hash.digest('hex').substring(0, 32);
+}
+
+// Save screenshot to disk and return token (falls back to null if disk storage fails)
+async function saveScreenshotToDisk(screenshotBuffer, url) {
+    try {
+        const token = generateScreenshotToken(url);
+        const filename = `${token}.png`;
+        const filepath = path.join(SCREENSHOT_DIR, filename);
+        
+        await fs.writeFile(filepath, screenshotBuffer);
+        
+        // Store token mapping
+        screenshotTokens.set(token, {
+            filepath: filepath,
+            url: url,
+            timestamp: Date.now()
+        });
+        
+        console.log(`💾 Screenshot saved to disk: ${filename}`);
+        return token;
+    } catch (error) {
+        // Don't crash - fall back to base64 encoding
+        console.warn(`⚠️ Failed to save screenshot to disk: ${error.message}`);
+        console.warn(`⚠️ Falling back to base64 encoding for this screenshot`);
+        return null; // Return null to indicate disk save failed
+    }
+}
+
+// Get screenshot URL from token
+function getScreenshotUrl(token) {
+    if (SCREENSHOT_URL_BASE) {
+        return `${SCREENSHOT_URL_BASE}/screenshot/${token}`;
+    }
+    // Relative URL (will use request host)
+    return `/screenshot/${token}`;
+}
+
+// Clean up old screenshot files
+async function cleanupOldScreenshots() {
+    try {
+        const files = await fs.readdir(SCREENSHOT_DIR);
+        const now = Date.now();
+        let cleaned = 0;
+        
+        for (const file of files) {
+            if (!file.endsWith('.png')) continue;
+            
+            const filepath = path.join(SCREENSHOT_DIR, file);
+            const stats = await fs.stat(filepath);
+            const age = now - stats.mtimeMs;
+            
+            if (age > CACHE_TTL) {
+                await fs.unlink(filepath);
+                cleaned++;
+            }
+        }
+        
+        // Clean up token mappings
+        for (const [token, data] of screenshotTokens.entries()) {
+            if (now - data.timestamp > CACHE_TTL) {
+                screenshotTokens.delete(token);
+            }
+        }
+        
+        if (cleaned > 0) {
+            console.log(`🧹 Cleaned up ${cleaned} old screenshot files`);
+        }
+    } catch (error) {
+        console.warn(`⚠️ Screenshot cleanup error:`, error.message);
+    }
+}
+
+// Run cleanup every 10 minutes
+setInterval(cleanupOldScreenshots, 10 * 60 * 1000);
 
 // Initialize browser
 async function initBrowser() {
@@ -145,7 +247,7 @@ async function captureScreenshot(url) {
         const cacheEntry = screenshotCache.get(url);
         if (cacheEntry && isCacheValid(cacheEntry.timestamp)) {
             console.log(`📦 Cache hit: ${url}`);
-            return cacheEntry.screenshot;
+            return cacheEntry.screenshotUrl || cacheEntry.screenshot; // Support both old base64 and new URL format
         }
 
         console.log(`📸 Capturing screenshot: ${url}`);
@@ -223,9 +325,8 @@ async function captureScreenshot(url) {
         // Close context
         await context.close();
         
-        // Convert to base64
-        const base64Screenshot = screenshot.toString('base64');
-        const dataUrl = `data:image/png;base64,${base64Screenshot}`;
+        // Save screenshot to disk and get token (may return null if disk storage fails)
+        const token = await saveScreenshotToDisk(screenshot, url);
         
         // Extract text using OCR
         const extractedText = await extractTextFromScreenshot(screenshot);
@@ -233,9 +334,26 @@ async function captureScreenshot(url) {
         // Analyze page content
         const analysis = analyzePageContent(extractedText, url);
         
+        // Determine screenshot format: URL if disk storage worked, base64 if it failed
+        let screenshotUrl;
+        let screenshotData;
+        
+        if (token) {
+            // Disk storage succeeded - use URL
+            screenshotUrl = getScreenshotUrl(token);
+        } else {
+            // Disk storage failed - fall back to base64
+            const base64Screenshot = screenshot.toString('base64');
+            screenshotData = `data:image/png;base64,${base64Screenshot}`;
+            screenshotUrl = screenshotData; // Use base64 as URL for backward compatibility
+            console.log(`⚠️ Using base64 encoding (disk storage unavailable)`);
+        }
+        
         // Cache the result with analysis
         const newCacheEntry = {
-            screenshot: dataUrl,
+            screenshotUrl: screenshotUrl,
+            screenshot: screenshotData || null, // Include base64 if available
+            token: token,
             timestamp: Date.now(),
             text: extractedText,
             analysis: analysis
@@ -245,10 +363,15 @@ async function captureScreenshot(url) {
         pageAnalysisCache.set(url, analysis);
         
         console.log(`✅ Screenshot captured: ${url}`);
+        if (token) {
+            console.log(`📸 Screenshot URL: ${screenshotUrl}`);
+        } else {
+            console.log(`📸 Screenshot encoded as base64 (${screenshotData.length} chars)`);
+        }
         console.log(`📊 Page type: ${analysis.pageType} (confidence: ${Math.round(analysis.confidence * 100)}%)`);
         console.log(`🔍 Key topics: ${analysis.keyTopics.join(', ') || 'none'}`);
         
-        return dataUrl;
+        return screenshotUrl;
         
         } catch (error) {
             console.error(`❌ Error capturing screenshot for ${url}:`, error.message);
@@ -302,6 +425,92 @@ app.get('/', (req, res) => {
     });
 });
 
+// Serve screenshot files by token
+app.get('/screenshot/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+        
+        // Look up token
+        const tokenData = screenshotTokens.get(token);
+        if (!tokenData) {
+            console.warn(`[SCREENSHOT] Token not found: ${token}`);
+            return res.status(404).json({
+                error: 'Screenshot not found',
+                message: 'Screenshot token is invalid or has expired'
+            });
+        }
+        
+        // Check if file exists
+        try {
+            const filepath = tokenData.filepath;
+            
+            // Try to stat the file
+            let fileStats;
+            try {
+                fileStats = await fs.stat(filepath);
+            } catch (statError) {
+                // File doesn't exist - clean up and return 404
+                console.warn(`[SCREENSHOT] File not found: ${filepath}`);
+                screenshotTokens.delete(token);
+                return res.status(404).json({
+                    error: 'Screenshot file not found',
+                    message: 'The screenshot file is missing'
+                });
+            }
+            
+            // Check if file is too old (expired)
+            const age = Date.now() - fileStats.mtimeMs;
+            if (age > CACHE_TTL) {
+                // Clean up expired file
+                console.log(`[SCREENSHOT] File expired, cleaning up: ${token}`);
+                await fs.unlink(filepath).catch(() => {});
+                screenshotTokens.delete(token);
+                return res.status(404).json({
+                    error: 'Screenshot expired',
+                    message: 'Screenshot has expired and been removed'
+                });
+            }
+            
+            // Read and send file
+            try {
+                const fileContent = await fs.readFile(filepath);
+                
+                // Set appropriate headers
+                res.setHeader('Content-Type', 'image/png');
+                res.setHeader('Cache-Control', 'public, max-age=300'); // Cache for 5 minutes
+                res.setHeader('Expires', new Date(Date.now() + CACHE_TTL).toUTCString());
+                
+                // Send file
+                res.send(fileContent);
+                console.log(`[SCREENSHOT] Served file: ${token} (${fileContent.length} bytes)`);
+                
+            } catch (readError) {
+                console.error(`[SCREENSHOT] Error reading file ${filepath}:`, readError.message);
+                screenshotTokens.delete(token);
+                return res.status(500).json({
+                    error: 'Failed to read screenshot file',
+                    message: 'The screenshot file could not be read'
+                });
+            }
+            
+        } catch (error) {
+            console.error(`[SCREENSHOT] Error serving screenshot ${token}:`, error.message);
+            screenshotTokens.delete(token);
+            return res.status(404).json({
+                error: 'Screenshot file not found',
+                message: 'The screenshot file is missing'
+            });
+        }
+        
+    } catch (error) {
+        console.error('[SCREENSHOT] Screenshot serve error:', error.message);
+        res.status(500).json({
+            error: 'Failed to serve screenshot',
+            message: error.message
+        });
+    }
+});
+
 app.post('/capture', async (req, res) => {
     try {
         const { url } = req.body;
@@ -323,11 +532,14 @@ app.post('/capture', async (req, res) => {
             });
         }
         
-        // Capture screenshot
+        // Capture screenshot (returns URL now, not base64)
         const screenshot = await captureScreenshot(url);
         
-        // Send response
-        res.json({ screenshot });
+        // Send response - screenshot is now a URL, not base64
+        res.json({ 
+            screenshot: screenshot,
+            screenshotUrl: screenshot // Explicit field for clarity
+        });
         
     } catch (error) {
         console.error('❌ Capture error:', error.message);
@@ -359,7 +571,7 @@ app.post('/capture', async (req, res) => {
     }
 });
 
-// Get page analysis endpoint
+// Get page analysis endpoint (maintained for backward compatibility)
 app.get('/analyze/:url', async (req, res) => {
     try {
         const url = decodeURIComponent(req.params.url);
@@ -385,6 +597,106 @@ app.get('/analyze/:url', async (req, res) => {
         res.status(500).json({
             error: 'Failed to get analysis',
             message: error.message
+        });
+    }
+});
+
+// Consolidated context endpoint - returns screenshot AND analysis in one call
+// This eliminates the need for separate /capture and /analyze requests
+app.post('/context', async (req, res) => {
+    try {
+        const { url } = req.body;
+        
+        if (!url) {
+            return res.status(400).json({
+                error: 'Missing url parameter',
+                message: 'Please provide a url in the request body: { "url": "https://example.com" }'
+            });
+        }
+        
+        // Validate URL
+        try {
+            new URL(url);
+        } catch (error) {
+            return res.status(400).json({
+                error: 'Invalid URL',
+                message: 'Please provide a valid URL'
+            });
+        }
+        
+        console.log(`📸 [CONTEXT] Capturing screenshot and generating analysis for: ${url}`);
+        
+        // Check cache first - if we have both screenshot and analysis, return immediately
+        const cacheEntry = screenshotCache.get(url);
+        const analysis = pageAnalysisCache.get(url);
+        
+        if (cacheEntry && isCacheValid(cacheEntry.timestamp) && analysis) {
+            console.log(`📦 [CONTEXT] Cache hit: ${url}`);
+            // Return URL if available, otherwise base64 (backward compatibility)
+            const screenshot = cacheEntry.screenshotUrl || cacheEntry.screenshot;
+            return res.json({
+                url: url,
+                screenshot: screenshot,
+                screenshotUrl: cacheEntry.screenshotUrl || null, // New field for URL
+                analysis: analysis,
+                text: cacheEntry.text || '',
+                cached: true,
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        // Capture screenshot (this also generates analysis internally)
+        const screenshotUrl = await captureScreenshot(url);
+        
+        // Get the fresh analysis from cache (captureScreenshot updates both caches)
+        const freshAnalysis = pageAnalysisCache.get(url);
+        const freshCacheEntry = screenshotCache.get(url);
+        
+        console.log(`✅ [CONTEXT] Screenshot and analysis ready for: ${url}`);
+        console.log(`📊 [CONTEXT] Page type: ${freshAnalysis?.pageType || 'unknown'}`);
+        
+        // Send response with both screenshot URL and analysis
+        res.json({
+            url: url,
+            screenshot: screenshotUrl, // URL instead of base64
+            screenshotUrl: screenshotUrl, // Explicit URL field
+            analysis: freshAnalysis || {
+                pageType: 'unknown',
+                keyTopics: [],
+                suggestedActions: [],
+                confidence: 0
+            },
+            text: freshCacheEntry?.text || '',
+            cached: false,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error('❌ [CONTEXT] Error:', error.message);
+        
+        // Return appropriate HTTP status codes
+        let statusCode = 500;
+        let errorMessage = error.message;
+        
+        if (error.isTimeout) {
+            statusCode = 504;
+            errorMessage = `Page load timeout: The requested page took too long to load. This may happen with slow sites, sites that block automated access, or pages requiring authentication.`;
+        } else if (error.message.includes('403') || error.message.includes('blocked')) {
+            statusCode = 403;
+            errorMessage = `Access denied: This site blocks automated access. Try accessing the page manually first.`;
+        } else if (error.message.includes('404')) {
+            statusCode = 404;
+            errorMessage = `Page not found: The requested URL does not exist or is no longer available.`;
+        } else if (error.message.includes('net::ERR_NAME_NOT_RESOLVED')) {
+            statusCode = 404;
+            errorMessage = `Domain not found: The requested domain name could not be resolved.`;
+        }
+        
+        res.status(statusCode).json({
+            error: error.isTimeout ? 'Page load timeout' : 'Failed to capture context',
+            message: errorMessage,
+            url: url,
+            retryAfter: error.isTimeout ? '30s' : undefined
         });
     }
 });
@@ -757,6 +1069,9 @@ app.use((req, res) => {
 
 // Start server
 async function start() {
+    // Ensure screenshot directory exists
+    await ensureScreenshotDir();
+    
     await initBrowser();
     
     app.listen(PORT, () => {
@@ -765,11 +1080,15 @@ async function start() {
         console.log('===================================================');
         console.log(`Server running on http://localhost:${PORT}`);
         console.log(`Endpoint: POST http://localhost:${PORT}/capture`);
+        console.log(`Context: POST http://localhost:${PORT}/context`);
+        console.log(`Screenshots: GET http://localhost:${PORT}/screenshot/:token`);
         console.log(`MCP Endpoint: POST http://localhost:${PORT}/mcp`);
         console.log(`Health: GET http://localhost:${PORT}/health`);
         console.log('===================================================\n');
         console.log('REST API: POST /capture with { "url": "..." }');
+        console.log('Context API: POST /context with { "url": "..." }');
         console.log('MCP Protocol: POST /mcp with JSON-RPC 2.0');
+        console.log(`Screenshot storage: ${SCREENSHOT_DIR}`);
         console.log('\nWaiting for requests...\n');
     });
 }

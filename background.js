@@ -138,6 +138,39 @@ async function captureScreenshotREST(backendUrl, url) {
     return { success: true, data };
 }
 
+// REST-based context fetch (consolidated endpoint - returns screenshot AND analysis)
+async function fetchContextREST(backendUrl, url) {
+    const normalizedUrl = normalizeBackendUrl(backendUrl);
+    const res = await fetch(`${normalizedUrl}/context`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ url })
+    });
+    
+    if (!res.ok) {
+        let errorMessage = `HTTP ${res.status}`;
+        try {
+            const errorJson = await res.json();
+            errorMessage = errorJson.message || errorJson.error || errorMessage;
+        } catch (e) {
+            try {
+                const errorText = await res.text();
+                if (errorText) {
+                    errorMessage = errorText.substring(0, 200);
+                }
+            } catch (e2) {}
+        }
+        const error = new Error(errorMessage);
+        error.statusCode = res.status;
+        throw error;
+    }
+    
+    const data = await res.json();
+    return { success: true, data };
+}
+
 // MCP-based chat
 async function chatMCP(backendUrl, message, currentUrl, url, openaiKey, tooltipHistory) {
     try {
@@ -503,11 +536,113 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         
         return true; // Keep message channel open for async response
     }
+    else if (request.action === 'fetch-context') {
+        // Fetch consolidated context (screenshot + analysis) from backend
+        // This replaces separate /capture and /analyze calls for better performance
+        console.log('📸 Fetching context from backend (screenshot + analysis)...');
+        console.log('🔹 URL:', request.url);
+        
+        // Keep message channel open for async response
+        const sendResponseAsync = (response) => {
+            try {
+                if (chrome.runtime.lastError) {
+                    console.error('❌ Runtime error sending response:', chrome.runtime.lastError);
+                } else {
+                    sendResponse(response);
+                }
+            } catch (error) {
+                console.error('❌ Error sending response:', error);
+            }
+        };
+        
+        // Get backend URL from storage
+        getProtocolPreference(async (useMCP, backendUrl) => {
+            try {
+                // Try /context endpoint first (new consolidated endpoint)
+                console.log('🌐 Using REST API /context endpoint');
+                const result = await fetchContextREST(backendUrl, request.url);
+                
+                console.log('✅ Context data received from backend (screenshot + analysis)');
+                sendResponseAsync(result);
+            } catch (error) {
+                // Log as warning (not error) since we have a fallback
+                // This prevents Chrome from showing it as a critical error
+                const errorMessage = error.message || error.toString() || '';
+                const isEndpointNotFound = error.statusCode === 404 || 
+                                         errorMessage.toLowerCase().includes('not found') || 
+                                         errorMessage.includes('404') ||
+                                         errorMessage.includes('endpoint') ||
+                                         errorMessage.toLowerCase().includes('/context');
+                
+                if (isEndpointNotFound) {
+                    // This is expected if backend hasn't been updated - use fallback
+                    console.warn('⚠️ /context endpoint not available (backend may not be updated yet), falling back to /capture endpoint');
+                } else {
+                    // Other errors are still logged as errors
+                    console.error('❌ Context fetch error:', error);
+                    console.warn('⚠️ Attempting fallback to /capture endpoint...');
+                }
+                try {
+                    // Fallback to old /capture endpoint
+                    const fallbackResult = await captureScreenshotREST(backendUrl, request.url);
+                    
+                    // Get analysis separately if available
+                    const normalizedUrl = normalizeBackendUrl(backendUrl);
+                    let analysis = null;
+                    try {
+                        const analysisUrl = encodeURIComponent(request.url);
+                        const analysisRes = await fetch(`${normalizedUrl}/analyze/${analysisUrl}`);
+                        if (analysisRes.ok) {
+                            const analysisData = await analysisRes.json();
+                            analysis = analysisData.analysis || null;
+                        }
+                    } catch (e) {
+                        // Analysis fetch failed, continue without it
+                        console.log('⚠️ Could not fetch analysis separately');
+                    }
+                    
+                    // Combine screenshot with analysis
+                    const combinedResult = {
+                        success: true,
+                        data: {
+                            screenshot: fallbackResult.data.screenshot || fallbackResult.data.screenshotUrl,
+                            screenshotUrl: fallbackResult.data.screenshotUrl || fallbackResult.data.screenshot,
+                            analysis: analysis || {
+                                pageType: 'unknown',
+                                keyTopics: [],
+                                suggestedActions: [],
+                                confidence: 0
+                            },
+                            text: fallbackResult.data.text || ''
+                        }
+                    };
+                    
+                    console.log('✅ Fallback to /capture succeeded');
+                    sendResponseAsync(combinedResult);
+                    return;
+                } catch (fallbackError) {
+                    console.error('❌ Fallback to /capture also failed:', fallbackError);
+                    // If fallback fails, send the original error
+                    sendResponseAsync({ 
+                        success: false, 
+                        error: error.message || error.toString(),
+                        statusCode: error.statusCode || 500,
+                        backendUrl: backendUrl,
+                        note: 'Both /context and /capture endpoints failed'
+                    });
+                }
+            }
+        });
+        
+        return true; // Keep message channel open for async response
+    }
     else if (request.action === 'fetch-screenshot') {
         // Proxy screenshot request through background script to avoid Mixed Content issues
         // Background scripts can make HTTP requests even when page is HTTPS
+        // NOTE: This is kept for backward compatibility, but fetch-context is preferred
         console.log('📸 Fetching screenshot from backend (proxying through background)...');
         console.log('🔹 URL:', request.url);
+        console.log('⚠️ Consider using fetch-context for better performance (includes analysis)');
         
         // Keep message channel open for async response
         const sendResponseAsync = (response) => {
@@ -582,17 +717,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         };
         
         // Get protocol preference and backend URL from storage
+        // NOTE: Always use REST for OCR (MCP causes initialization issues)
         getProtocolPreference(async (useMCP, backendUrl) => {
             try {
-                let result;
-                
-                if (useMCP) {
-                    console.log('🔌 Using MCP protocol for OCR');
-                    result = await ocrUploadMCP(backendUrl, request.image);
-                } else {
-                    console.log('🌐 Using REST API for OCR');
-                    result = await ocrUploadREST(backendUrl, request.image);
-                }
+                // Always use REST API for OCR (MCP has initialization issues)
+                console.log('🌐 Using REST API for OCR (MCP disabled for OCR)');
+                const result = await ocrUploadREST(backendUrl, request.image);
                 
                 console.log('✅ OCR result received from backend');
                 sendResponseAsync(result);
@@ -601,24 +731,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 console.error('❌ OCR error details:', {
                     message: error.message,
                     name: error.name,
-                    isInitializationError: error.message?.includes('initialization') || error.message?.includes('MCP client')
+                    statusCode: error.statusCode
                 });
-                
-                // If MCP fails for any reason, automatically fallback to REST
-                if (useMCP) {
-                    console.log('⚠️ MCP failed, automatically falling back to REST');
-                    console.log('⚠️ Error was:', error.message);
-                    try {
-                        console.log('🌐 Attempting REST fallback for OCR...');
-                        const result = await ocrUploadREST(backendUrl, request.image);
-                        console.log('✅ REST fallback succeeded - OCR working via REST');
-                        sendResponseAsync(result);
-                        return;
-                    } catch (restError) {
-                        console.error('❌ REST fallback also failed:', restError);
-                        // Continue to send error response below
-                    }
-                }
                 
                 sendResponseAsync({ 
                     success: false, 

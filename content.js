@@ -308,19 +308,61 @@
             return tooltipDiv;
         }
         
-        // Show tooltip with screenshot
-        function showTooltip(x, y, screenshotUrl) {
+        // Show tooltip with cognitive summary first, then screenshot
+        function showTooltip(x, y, screenshotUrl, analysis) {
             if (!tooltipDiv) {
                 tooltipDiv = createTooltipElement();
             }
             
-            // Update tooltip content with error handling
-            if (screenshotUrl) {
+            // Show cognitive summary if available, otherwise show screenshot or loading
+            if (analysis && analysis.pageType !== 'unknown') {
+                // Hybrid Tooltip: Show cognitive summary first, screenshot loads in background
+                const pageTypeIcon = getPageTypeIcon(analysis.pageType);
+                const keyTopics = analysis.keyTopics && analysis.keyTopics.length > 0 
+                    ? analysis.keyTopics.slice(0, 3).join(' • ') 
+                    : 'General content';
+                const confidence = Math.round(analysis.confidence * 100);
+                
+                let summaryHTML = `
+                    <div style="padding: 14px; font-family: 'Montserrat', sans-serif;">
+                        <div style="font-weight: 600; font-size: 13px; color: rgba(255, 255, 255, 0.95); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                            ${pageTypeIcon} <span style="text-transform: capitalize;">${analysis.pageType}</span>
+                            ${confidence > 50 ? `<span style="font-size: 10px; color: rgba(255, 255, 255, 0.5); font-weight: normal;">(${confidence}%)</span>` : ''}
+                        </div>
+                        ${analysis.keyTopics && analysis.keyTopics.length > 0 ? `
+                            <div style="font-size: 11px; color: rgba(255, 255, 255, 0.75); margin-bottom: 6px;">
+                                📌 ${keyTopics}
+                            </div>
+                        ` : ''}
+                        ${analysis.suggestedActions && analysis.suggestedActions.length > 0 ? `
+                            <div style="font-size: 10px; color: rgba(255, 255, 255, 0.6); margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.1);">
+                                💡 ${analysis.suggestedActions[0]}
+                            </div>
+                        ` : ''}
+                        ${screenshotUrl ? `
+                            <div id="tooltip-screenshot-container" style="margin-top: 10px; display: none;">
+                                <img src="${screenshotUrl}" 
+                                    style="display: block; width: 100%; height: auto; max-height: 200px; object-fit: cover; border-radius: 8px;" 
+                                    alt="Preview" 
+                                    onload="this.parentElement.style.display='block';"
+                                    onerror="this.parentElement.style.display='none';">
+                            </div>
+                        ` : `
+                            <div style="margin-top: 8px; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center;">
+                                📸 Loading preview...
+                            </div>
+                        `}
+                    </div>
+                `;
+                tooltipDiv.innerHTML = summaryHTML;
+            } else if (screenshotUrl) {
+                // Fallback: Show screenshot directly if no analysis available
                 tooltipDiv.innerHTML = `<img src="${screenshotUrl}" 
                     style="display: block; width: 100%; height: auto; max-height: ${MAX_TOOLTIP_HEIGHT}px; object-fit: cover;" 
                     alt="Link preview" 
                     onerror="this.style.display='none'; this.parentElement.innerHTML='<div style=&quot;padding: 20px; text-align: center; color: rgba(244, 67, 54, 0.9); font-family: Montserrat, sans-serif;&quot;>⚠️ Failed to load preview</div>'">`;
             } else {
+                // Loading state
                 tooltipDiv.innerHTML = `<div style="padding: 20px; text-align: center; color: rgba(255, 255, 255, 0.7); font-family: Montserrat, sans-serif;">Loading preview...</div>`;
             }
             
@@ -356,6 +398,41 @@
             // Mark as visible
             activeTooltip.isVisible = true;
             activeTooltip.displayStartTime = Date.now();
+        }
+        
+        // Helper function to get icon for page type
+        function getPageTypeIcon(pageType) {
+            const icons = {
+                'login': '🔐',
+                'ecommerce': '🛒',
+                'banking': '🏦',
+                'news': '📰',
+                'contact': '📞',
+                'unknown': '🌐'
+            };
+            return icons[pageType] || icons['unknown'];
+        }
+        
+        // Update tooltip with screenshot when it loads (for hybrid tooltip)
+        function updateTooltipWithScreenshot(screenshotUrl) {
+            if (!tooltipDiv || !activeTooltip.isVisible) return;
+            
+            const container = tooltipDiv.querySelector('#tooltip-screenshot-container');
+            if (container) {
+                // Update the loading indicator with actual screenshot
+                container.innerHTML = `
+                    <img src="${screenshotUrl}" 
+                        style="display: block; width: 100%; height: auto; max-height: 200px; object-fit: cover; border-radius: 8px;" 
+                        alt="Preview"
+                        onerror="this.parentElement.style.display='none';">
+                `;
+                container.style.display = 'block';
+            } else {
+                // Fallback: If no container exists, replace entire content
+                tooltipDiv.innerHTML = `<img src="${screenshotUrl}" 
+                    style="display: block; width: 100%; height: auto; max-height: ${MAX_TOOLTIP_HEIGHT}px; object-fit: cover;" 
+                    alt="Link preview">`;
+            }
         }
         
         // Hide tooltip
@@ -399,9 +476,10 @@
             }
         }
 
-        // Fetch screenshot from backend with retry mechanism
+        // Fetch context (screenshot + analysis) from backend with retry mechanism
         // Uses background script proxy to avoid Mixed Content issues on HTTPS pages
-        async function fetchScreenshot(url, retryCount = 0) {
+        // This replaces separate screenshot and analysis calls for better performance
+        async function fetchContext(url, retryCount = 0) {
             const maxRetries = 2;
             const retryDelay = Math.pow(2, retryCount) * 1000; // Exponential backoff: 1s, 2s, 4s
             
@@ -412,8 +490,8 @@
             }
             
             try {
-                console.log(`📸 Fetching screenshot for: ${url}${retryCount > 0 ? ` (attempt ${retryCount + 1})` : ''}`);
-                console.log(`📸 Using background script proxy to avoid Mixed Content issues`);
+                console.log(`📸 Fetching context (screenshot + analysis) for: ${url}${retryCount > 0 ? ` (attempt ${retryCount + 1})` : ''}`);
+                console.log(`📸 Using consolidated /context endpoint via background script`);
                 
                 // Use background script to proxy the request (bypasses Mixed Content restrictions)
                 const response = await new Promise((resolve, reject) => {
@@ -424,7 +502,7 @@
                     }
                     
                     chrome.runtime.sendMessage(
-                        { action: 'fetch-screenshot', url: url },
+                        { action: 'fetch-context', url: url },
                         (response) => {
                             if (chrome.runtime.lastError) {
                                 const errorMsg = chrome.runtime.lastError.message;
@@ -436,7 +514,7 @@
                                     reject(new Error(errorMsg));
                                 }
                             } else if (!response || !response.success) {
-                                reject(new Error(response?.error || 'Failed to fetch screenshot'));
+                                reject(new Error(response?.error || 'Failed to fetch context'));
                             } else {
                                 resolve(response);
                             }
@@ -444,44 +522,59 @@
                     );
                 });
                 
-                console.log(`📸 Response received from background proxy`);
+                console.log(`📸 Context response received from background proxy`);
                 
                 const data = response.data;
-                console.log(`✅ Received response, converting to blob...`);
+                console.log(`✅ Received context data, processing screenshot and analysis...`);
                 
-                // Handle different response formats and convert to blob
-                let base64Data;
-                if (typeof data === 'string') {
-                    base64Data = data;
-                } else if (data.screenshot) {
-                    base64Data = data.screenshot;
-                } else if (data.url) {
-                    base64Data = data.url;
-                } else if (data.body && data.body.screenshot) {
-                    base64Data = data.body.screenshot;
+                // Extract screenshot URL or base64, analysis, and text from response
+                const screenshotUrlOrData = data.screenshotUrl || data.screenshot;
+                const analysis = data.analysis || {
+                    pageType: 'unknown',
+                    keyTopics: [],
+                    suggestedActions: [],
+                    confidence: 0
+                };
+                const extractedText = data.text || '';
+                
+                let finalScreenshotUrl;
+                let base64DataForStorage = null;
+                
+                // Check if screenshot is a URL (new format) or base64 (old format for backward compatibility)
+                if (screenshotUrlOrData && !screenshotUrlOrData.startsWith('data:image/') && (screenshotUrlOrData.startsWith('http://') || screenshotUrlOrData.startsWith('https://') || screenshotUrlOrData.startsWith('/'))) {
+                    // New format: URL reference
+                    // Resolve relative URLs to absolute
+                    if (screenshotUrlOrData.startsWith('/')) {
+                        // Relative URL - construct absolute URL using backend URL
+                        const backendBase = BACKEND_SERVICE_URL.replace(/\/$/, '');
+                        finalScreenshotUrl = backendBase + screenshotUrlOrData;
+                    } else {
+                        finalScreenshotUrl = screenshotUrlOrData;
+                    }
+                    console.log(`✅ Screenshot URL received: ${finalScreenshotUrl}`);
+                } else if (screenshotUrlOrData && screenshotUrlOrData.startsWith('data:image/')) {
+                    // Old format: base64 data URL (backward compatibility)
+                    console.log(`⚠️ Received base64 screenshot (old format), converting to blob URL`);
+                    base64DataForStorage = screenshotUrlOrData;
+                    
+                    // Extract base64 data from data URL
+                    const commaIndex = screenshotUrlOrData.indexOf(',');
+                    const base64String = screenshotUrlOrData.substring(commaIndex + 1);
+                    
+                    // Convert base64 to blob
+                    const binaryString = atob(base64String);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    const blob = new Blob([bytes], { type: 'image/png' });
+                    finalScreenshotUrl = URL.createObjectURL(blob);
+                    console.log(`✅ Converted base64 to blob URL`);
                 } else {
-                    throw new Error('Invalid response format');
+                    throw new Error('No screenshot data or URL in response');
                 }
                 
-                // Extract base64 data from data URL if present
-                let base64String;
-                if (base64Data.startsWith('data:image/')) {
-                    // Extract just the base64 part after the comma
-                    const commaIndex = base64Data.indexOf(',');
-                    base64String = base64Data.substring(commaIndex + 1);
-                } else {
-                    base64String = base64Data;
-                }
-                
-                // Convert base64 to blob
-                const binaryString = atob(base64String);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-                const blob = new Blob([bytes], { type: 'image/png' });
-                const blobUrl = URL.createObjectURL(blob);
-                console.log(`✅ Blob URL created: ${blobUrl.substring(0, 50)}...`);
+                console.log(`📊 Analysis received: ${analysis.pageType} (confidence: ${Math.round(analysis.confidence * 100)}%)`);
                 
                 // Clean up old blob URLs to prevent memory leaks
                 const cacheEntry = cache.get(url);
@@ -489,18 +582,26 @@
                     URL.revokeObjectURL(cacheEntry.screenshotUrl);
                 }
                 
-                // Cache both blob URL (for display) and base64 data (for OCR)
+                // Cache screenshot URL, analysis, and text
                 cache.set(url, {
-                    screenshotUrl: blobUrl,
-                    base64Data: base64Data,  // Store base64 for OCR processing
+                    screenshotUrl: finalScreenshotUrl,
+                    base64Data: base64DataForStorage,  // Store base64 only if we received it (old format)
+                    analysis: analysis,               // Store analysis for cognitive summary
+                    text: extractedText,              // Store extracted text
                     timestamp: Date.now()
                 });
                 
-                // Also save to IndexedDB for persistence (save base64 data, not blob URL)
-                await saveToIndexedDB(url, base64Data);
+                // Also save to IndexedDB for persistence (save base64 if available, otherwise store URL)
+                if (base64DataForStorage) {
+                    await saveToIndexedDB(url, base64DataForStorage);
+                }
                 
-                console.log(`✅ Screenshot cached successfully`);
-                return blobUrl;
+                console.log(`✅ Context cached successfully (screenshot + analysis)`);
+                return {
+                    screenshotUrl: finalScreenshotUrl,
+                    analysis: analysis,
+                    text: extractedText
+                };
                 
             } catch (error) {
                 // Handle extension context invalidation gracefully (don't log as error)
@@ -512,7 +613,7 @@
                     throw error;
                 }
                 
-                console.error(`❌ Failed to fetch screenshot for ${url}:`, error);
+                console.error(`❌ Failed to fetch context for ${url}:`, error);
                 
                 // Provide helpful error messages based on error type and HTTP status
                 let errorMessage = error.message;
@@ -560,9 +661,21 @@
                 if (retryCount < maxRetries && !is403 && !is404 && (isTimeout || is500 || isFailedFetch)) {
                     console.log(`🔄 Retrying in ${retryDelay / 1000}s... (attempt ${retryCount + 2}/${maxRetries + 1})`);
                     await new Promise(resolve => setTimeout(resolve, retryDelay));
-                    return fetchScreenshot(url, retryCount + 1);
+                    return fetchContext(url, retryCount + 1);
                 }
                 
+                throw error;
+            }
+        }
+
+        // Fetch screenshot from backend with retry mechanism (backward compatibility)
+        // DEPRECATED: Use fetchContext() instead for better performance
+        async function fetchScreenshot(url, retryCount = 0) {
+            // Redirect to fetchContext but only return screenshot URL for compatibility
+            try {
+                const context = await fetchContext(url, retryCount);
+                return context.screenshotUrl;
+            } catch (error) {
                 throw error;
             }
         }
@@ -654,26 +767,41 @@
             }
         }
         
-        // Get screenshot (from IndexedDB, cache, or fetch)
-        async function getScreenshot(url) {
+        // Get context (screenshot + analysis) from cache or fetch
+        async function getContext(url) {
             // Check memory cache first
             const cacheEntry = cache.get(url);
             if (isCacheValid(cacheEntry)) {
                 console.log(`💾 Memory cache hit: ${url}`);
-                return cacheEntry.screenshotUrl;
+                return {
+                    screenshotUrl: cacheEntry.screenshotUrl,
+                    analysis: cacheEntry.analysis || null,
+                    text: cacheEntry.text || ''
+                };
             }
             
-            // Try IndexedDB
+            // Try IndexedDB (but we need to fetch context if analysis not in cache)
             const indexedDBScreenshot = await loadFromIndexedDB(url);
-            if (indexedDBScreenshot) {
-                return indexedDBScreenshot;
+            if (indexedDBScreenshot && cacheEntry && cacheEntry.analysis) {
+                return {
+                    screenshotUrl: indexedDBScreenshot,
+                    analysis: cacheEntry.analysis,
+                    text: cacheEntry.text || ''
+                };
             }
             
-            // Fetch from backend
-            console.log(`🌐 Fetching from backend: ${url}`);
-            const screenshotUrl = await fetchScreenshot(url);
+            // Fetch from backend (new consolidated endpoint)
+            console.log(`🌐 Fetching context from backend: ${url}`);
+            const context = await fetchContext(url);
             
-            return screenshotUrl;
+            return context;
+        }
+        
+        // Get screenshot (from IndexedDB, cache, or fetch) - backward compatibility
+        // DEPRECATED: Use getContext() instead
+        async function getScreenshot(url) {
+            const context = await getContext(url);
+            return context.screenshotUrl;
         }
         
         // Extract info from local button
@@ -895,90 +1023,109 @@
             // Check cache first
             const cacheEntry = cache.get(url);
             if (cacheEntry && isCacheValid(cacheEntry)) {
-                // Cached - show after delay
+                // Cached - show after delay with cognitive summary
                 activeTooltip.timeout = setTimeout(() => {
                     if (activeTooltip.element === element && activeTooltip.currentUrl === url && !activeTooltip.isVisible) {
-                        showTooltip(event.clientX, event.clientY, cacheEntry.screenshotUrl);
+                        // Show tooltip with cognitive summary and cached screenshot
+                        showTooltip(event.clientX, event.clientY, cacheEntry.screenshotUrl, cacheEntry.analysis);
                         // Log tooltip event for AI awareness
                         logTooltipEvent({
                             url: url,
                             element: element.tagName.toLowerCase(),
-                            elementText: element.textContent?.trim() || ''
+                            elementText: element.textContent?.trim() || '',
+                            ocrText: cacheEntry.text || null
                         });
-                        // Process OCR in background (async, doesn't block tooltip display)
-                        processTooltipOCR(cacheEntry.screenshotUrl, url).then(ocrText => {
-                            if (ocrText) {
-                                // Update the most recent tooltip event with OCR text
-                                const lastEvent = window.tooltipHistory[window.tooltipHistory.length - 1];
-                                if (lastEvent && lastEvent.url === url) {
-                                    lastEvent.ocrText = ocrText;
-                                    
-                                    // Generate and add proactive summary to chat
-                                    if (typeof window.addProactiveOCRSummary === 'function') {
-                                        window.addProactiveOCRSummary(ocrText, url);
+                        
+                        // Show proactive information if available and chat is open
+                        if (cacheEntry.analysis && cacheEntry.text && typeof window.addProactiveOCRSummary === 'function') {
+                            setTimeout(() => {
+                                window.addProactiveOCRSummary(cacheEntry.text, url);
+                                
+                                // Also show analysis insights
+                                if (cacheEntry.analysis.pageType !== 'unknown') {
+                                    const insights = [];
+                                    if (cacheEntry.analysis.pageType !== 'unknown') {
+                                        insights.push(`Page type: ${cacheEntry.analysis.pageType}`);
+                                    }
+                                    if (cacheEntry.analysis.keyTopics && cacheEntry.analysis.keyTopics.length > 0) {
+                                        insights.push(`Topics: ${cacheEntry.analysis.keyTopics.slice(0, 3).join(', ')}`);
+                                    }
+                                    if (insights.length > 0 && typeof window.addChatMessage === 'function') {
+                                        window.addChatMessage(`🔍 Tooltip Preview Insights:\n${insights.join('\n')}`, 'bot');
                                     }
                                 }
-                            }
-                        });
+                            }, 500);
+                        }
                     }
                 }, HOVER_DELAY);
                 return;
             }
             
-            // Not cached - fetch with delay
+            // Not cached - fetch context with delay
             activeTooltip.timeout = setTimeout(() => {
                 // Only proceed if still on same element and not already visible
                 if (activeTooltip.element === element && activeTooltip.currentUrl === url && !activeTooltip.isVisible) {
-                    // Show loading
-                    showTooltip(event.clientX, event.clientY, null);
+                    // Show loading state immediately (no analysis yet)
+                    showTooltip(event.clientX, event.clientY, null, null);
                     
                     // Set a timeout to hide loading if it takes too long
                     const loadingTimeout = setTimeout(() => {
                         if (tooltipDiv && activeTooltip.isVisible) {
-                            console.warn('Screenshot load timeout, hiding tooltip');
+                            console.warn('Context load timeout, hiding tooltip');
                             hideTooltip();
                         }
                     }, 120000); // 2 minute timeout
                     
-                    // Fetch screenshot
-                    getScreenshot(url)
-                        .then(screenshotUrl => {
+                    // Fetch context (screenshot + analysis)
+                    getContext(url)
+                        .then(context => {
                             clearTimeout(loadingTimeout);
                             // Check if still valid before showing
                             if (activeTooltip.element === element && activeTooltip.currentUrl === url) {
-                                // Replace loading with screenshot
-                                if (tooltipDiv) {
-                                    tooltipDiv.innerHTML = `<img src="${screenshotUrl}" 
-                                        style="display: block; width: 100%; height: auto; max-height: ${MAX_TOOLTIP_HEIGHT}px; object-fit: cover;" 
-                                        alt="Link preview" 
-                                        onerror="this.style.display='none'; this.parentElement.innerHTML='<div style=&quot;padding: 20px; text-align: center; color: rgba(244, 67, 54, 0.9); font-family: Montserrat, sans-serif;&quot;>⚠️ Failed to load preview</div>'">`;
+                                // Show cognitive summary immediately with screenshot loading in background
+                                showTooltip(event.clientX, event.clientY, context.screenshotUrl, context.analysis);
+                                
+                                // Update screenshot when it loads (for hybrid tooltip)
+                                if (context.screenshotUrl) {
+                                    updateTooltipWithScreenshot(context.screenshotUrl);
                                 }
+                                
                                 // Log tooltip event for AI awareness
                                 logTooltipEvent({
                                     url: url,
                                     element: element.tagName.toLowerCase(),
-                                    elementText: element.textContent?.trim() || ''
+                                    elementText: element.textContent?.trim() || '',
+                                    ocrText: context.text || null
                                 });
-                                // Process OCR in background (async, doesn't block tooltip display)
-                                processTooltipOCR(screenshotUrl, url).then(ocrText => {
-                                    if (ocrText) {
-                                        // Update the most recent tooltip event with OCR text
-                                        const lastEvent = window.tooltipHistory[window.tooltipHistory.length - 1];
-                                        if (lastEvent && lastEvent.url === url) {
-                                            lastEvent.ocrText = ocrText;
-                                            
-                                            // Generate and add proactive summary to chat
-                                            if (typeof window.addProactiveOCRSummary === 'function') {
-                                                window.addProactiveOCRSummary(ocrText, url);
+                                
+                                // Show proactive information if chat is available
+                                if (context.analysis && typeof window.addProactiveOCRSummary === 'function') {
+                                    // Show proactive summary with analysis info
+                                    setTimeout(() => {
+                                        if (context.text && context.text.trim().length > 0) {
+                                            window.addProactiveOCRSummary(context.text, url);
+                                        }
+                                        
+                                        // Also show analysis insights proactively
+                                        if (context.analysis && context.analysis.pageType !== 'unknown') {
+                                            const insights = [];
+                                            if (context.analysis.pageType !== 'unknown') {
+                                                insights.push(`Page type: ${context.analysis.pageType}`);
+                                            }
+                                            if (context.analysis.keyTopics && context.analysis.keyTopics.length > 0) {
+                                                insights.push(`Topics: ${context.analysis.keyTopics.slice(0, 3).join(', ')}`);
+                                            }
+                                            if (insights.length > 0 && typeof window.addChatMessage === 'function') {
+                                                window.addChatMessage(`🔍 Tooltip Preview Insights:\n${insights.join('\n')}`, 'bot');
                                             }
                                         }
-                                    }
-                                });
+                                    }, 500); // Small delay to let tooltip render first
+                                }
                             }
                         })
                         .catch(error => {
                             clearTimeout(loadingTimeout);
-                            console.warn('Failed to load screenshot:', error);
+                            console.warn('Failed to load context:', error);
                             if (activeTooltip.element === element && activeTooltip.currentUrl === url && tooltipDiv) {
                                 // Show error message
                                 let errorMessage = '⚠️ Failed to load preview';
