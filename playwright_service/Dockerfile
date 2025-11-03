@@ -54,6 +54,9 @@ RUN apt-get update && apt-get install -y \
     lsb-release \
     wget \
     xdg-utils \
+    locales \
+    && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
+    && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -71,6 +74,7 @@ RUN npx playwright install-deps chromium
 
 # Copy application files
 COPY server.js ./
+COPY mcp-server.js ./
 COPY eng.traineddata ./
 
 # Expose port

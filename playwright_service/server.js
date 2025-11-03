@@ -50,19 +50,19 @@ const BLOCKED_TTL = 60 * 60 * 1000; // Don't retry blocked sites for 1 hour
 // Initialize browser
 async function initBrowser() {
     if (!browser) {
-        console.log('🚀 Initializing Playwright browser...');
+        console.log('[INFO] Initializing Playwright browser...');
         browser = await chromium.launch({
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
-        console.log('✅ Browser initialized');
+        console.log('[OK] Browser initialized');
     }
     return browser;
 }
 
 // Clean up browser on exit
 process.on('SIGINT', async () => {
-    console.log('\n⚠️ Shutting down...');
+    console.log('\n[WARN] Shutting down...');
     if (browser) {
         await browser.close();
     }
@@ -412,17 +412,17 @@ app.post('/chat', async (req, res) => {
             });
         }
         
-        console.log(`💬 Chat message: ${message}`);
-        console.log(`🔑 OpenAI key from request: ${openaiKey ? `YES (${openaiKey.substring(0, 10)}...)` : 'NO'}`);
-        console.log(`🔑 OpenAI key from env: ${process.env.OPENAI_API_KEY ? `YES (${process.env.OPENAI_API_KEY.substring(0, 10)}...)` : 'NO - KEY NOT SET`}`);
-        console.log(`🌐 Current URL: ${actualUrl || 'none'}`);
+        console.log(`[CHAT] Message: ${message}`);
+        console.log(`[KEY] From request: ${openaiKey ? 'YES (' + openaiKey.substring(0, 10) + '...)' : 'NO'}`);
+        console.log(`[KEY] From env: ${process.env.OPENAI_API_KEY ? 'YES (' + process.env.OPENAI_API_KEY.substring(0, 10) + '...)' : 'NO - KEY NOT SET'}`);
+        console.log(`[URL] Current: ${actualUrl || 'none'}`);
         
         // Log full key status for debugging (first few chars only)
         if (process.env.OPENAI_API_KEY) {
-            console.log(`✅ Backend has OpenAI API key configured (length: ${process.env.OPENAI_API_KEY.length} chars)`);
+            console.log(`[OK] Backend has OpenAI API key configured (length: ${process.env.OPENAI_API_KEY.length} chars)`);
         } else {
-            console.log(`❌ WARNING: Backend OPENAI_API_KEY environment variable is NOT set!`);
-            console.log(`   To set it: export OPENAI_API_KEY=sk-... (or configure in ECS task definition)`);
+            console.log(`[WARN] Backend OPENAI_API_KEY environment variable is NOT set!`);
+            console.log(`       To set it: export OPENAI_API_KEY=sk-... (or configure in ECS task definition)`);
         }
         
         // Use shared chat processing function
@@ -430,14 +430,14 @@ app.post('/chat', async (req, res) => {
         
         res.json(result);
         
-        console.log('✅ Chat response sent:', {
+        console.log('[OK] Chat response sent:', {
             response: result.response.substring(0, 100) + '...',
             timestamp: result.timestamp,
             hasContext: !!result.context
         });
         
     } catch (error) {
-        console.error('❌ Chat error:', error.message);
+        console.error('[ERROR] Chat error:', error.message);
         res.status(500).json({
             error: 'Failed to process chat message',
             message: error.message
@@ -531,15 +531,6 @@ app.use((err, req, res, next) => {
     });
 });
 
-// 404 handler
-app.use((req, res) => {
-    res.status(404).json({
-        error: 'Not found',
-        message: `Endpoint ${req.method} ${req.path} not found`,
-        timestamp: new Date().toISOString()
-    });
-});
-
 // Extract chat logic into reusable function
 async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs) {
     const actualUrl = currentUrl || url;
@@ -556,7 +547,7 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
     // Use OpenAI key from request if provided, otherwise use backend's default key
     const apiKeyToUse = (openaiKey && openaiKey.trim()) ? openaiKey.trim() : (process.env.OPENAI_API_KEY || '');
     
-    console.log('🔑 API Key check:', {
+    console.log('[KEY] API Key check:', {
         userProvided: !!(openaiKey && openaiKey.trim()),
         backendKey: !!(process.env.OPENAI_API_KEY),
         keyToUse: apiKeyToUse ? `${apiKeyToUse.substring(0, 10)}...` : 'NONE'
@@ -564,13 +555,13 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
     
     // Check if we have an OpenAI key to use
     if (apiKeyToUse) {
-        console.log('🤖 Using OpenAI API for chat response');
+        console.log('[INFO] Using OpenAI API for chat response');
         try {
             // Prepare messages for OpenAI
             const messages = [
                 {
                     role: 'system',
-                    content: `You are a helpful assistant for the Tooltip Companion browser extension. You help users understand web pages by analyzing screenshots and providing context-aware assistance.${contextInfo ? `\n\nUser is currently on a page with this context:${contextInfo}` : ''}`
+                    content: `You are a helpful assistant for the Tooltip Companion browser extension. You help users understand web pages by analyzing screenshots and providing context-aware assistance.${contextInfo ? '\n\nUser is currently on a page with this context:' + contextInfo : ''}`
                 },
                 {
                     role: 'user',
@@ -617,7 +608,7 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
             // Fall through to basic response
         }
     } else {
-        console.log('⚠️ No OpenAI API key available - using fallback response');
+        console.log('[WARN] No OpenAI API key available - using fallback response');
     }
     
     // Generate a basic helpful response (fallback)
@@ -699,7 +690,7 @@ app.post('/mcp', async (req, res) => {
     try {
         const request = req.body;
         
-        console.log('🔌 MCP endpoint called:', {
+        console.log('[MCP] Endpoint called:', {
             method: request.method,
             id: request.id,
             hasParams: !!request.params,
@@ -708,7 +699,7 @@ app.post('/mcp', async (req, res) => {
         
         // Validate JSON-RPC 2.0 request
         if (request.jsonrpc !== '2.0') {
-            console.error('❌ MCP: Invalid jsonrpc version:', request.jsonrpc);
+            console.error('[ERROR] MCP: Invalid jsonrpc version:', request.jsonrpc);
             return res.status(400).json({
                 jsonrpc: '2.0',
                 id: request.id || null,
@@ -723,7 +714,7 @@ app.post('/mcp', async (req, res) => {
         // Handle JSON-RPC 2.0 request
         const response = await mcpServer.handleRequest(request);
         
-        console.log('🔌 MCP: Request handled, response:', {
+        console.log('[MCP] Request handled, response:', {
             hasError: !!response?.error,
             hasResult: !!response?.result,
             isNotification: response === null
@@ -731,14 +722,14 @@ app.post('/mcp', async (req, res) => {
         
         // Notifications don't return responses
         if (response === null) {
-            console.log('🔌 MCP: Notification received (no response)');
+            console.log('[MCP] Notification received (no response)');
             return res.status(204).send(); // No Content
         }
         
         res.json(response);
     } catch (error) {
-        console.error('❌ MCP endpoint error:', error);
-        console.error('❌ MCP endpoint error details:', {
+        console.error('[ERROR] MCP endpoint error:', error);
+        console.error('[ERROR] MCP endpoint error details:', {
             message: error.message,
             stack: error.stack?.substring(0, 300),
             requestId: req.body?.id
@@ -755,28 +746,37 @@ app.post('/mcp', async (req, res) => {
     }
 });
 
+// 404 handler (must come after all routes)
+app.use((req, res) => {
+    res.status(404).json({
+        error: 'Not found',
+        message: `Endpoint ${req.method} ${req.path} not found`,
+        timestamp: new Date().toISOString()
+    });
+});
+
 // Start server
 async function start() {
     await initBrowser();
     
     app.listen(PORT, () => {
-        console.log('\n═══════════════════════════════════════════════════');
-        console.log('🚀 Playwright Tooltip Backend Service');
-        console.log('═══════════════════════════════════════════════════');
-        console.log(`📡 Server running on http://localhost:${PORT}`);
-        console.log(`📸 Endpoint: POST http://localhost:${PORT}/capture`);
-        console.log(`🔌 MCP Endpoint: POST http://localhost:${PORT}/mcp`);
-        console.log(`❤️  Health: GET http://localhost:${PORT}/health`);
-        console.log('═══════════════════════════════════════════════════\n');
-        console.log('💡 REST API: POST /capture with { "url": "..." }');
-        console.log('🔌 MCP Protocol: POST /mcp with JSON-RPC 2.0');
-        console.log('\n⏳ Waiting for requests...\n');
+        console.log('\n===================================================');
+        console.log('Playwright Tooltip Backend Service');
+        console.log('===================================================');
+        console.log(`Server running on http://localhost:${PORT}`);
+        console.log(`Endpoint: POST http://localhost:${PORT}/capture`);
+        console.log(`MCP Endpoint: POST http://localhost:${PORT}/mcp`);
+        console.log(`Health: GET http://localhost:${PORT}/health`);
+        console.log('===================================================\n');
+        console.log('REST API: POST /capture with { "url": "..." }');
+        console.log('MCP Protocol: POST /mcp with JSON-RPC 2.0');
+        console.log('\nWaiting for requests...\n');
     });
 }
 
 // Start the server
 start().catch(error => {
-    console.error('❌ Failed to start server:', error);
+    console.error('[ERROR] Failed to start server:', error);
     process.exit(1);
 });
 
