@@ -57,7 +57,7 @@
     
     // Default to cloud backend for production, fallback to localhost for development
     // Update DEFAULT_BACKEND after deploying to cloud (Railway, Render, etc.)
-    const DEFAULT_BACKEND = 'http://3.84.194.78:3000'; // AWS ECS Backend (updated 2025-11-02)
+    const DEFAULT_BACKEND = 'https://backend.tooltipcompanion.com'; // AWS ALB - Stable DNS (updated 2025-11-03)
     const DEV_BACKEND = 'http://localhost:3000';
     
     chrome.storage.sync.get({ backendUrl: DEFAULT_BACKEND }, (items) => {

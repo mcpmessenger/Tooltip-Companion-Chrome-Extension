@@ -1,4 +1,4 @@
-const defaultUrl = 'http://34.238.170.86:3000'; // AWS ECS Backend (updated 2025-11-02)
+const defaultUrl = 'https://backend.tooltipcompanion.com'; // AWS ALB - Stable DNS (updated 2025-11-03)
 
 function saveOptions() {
   const url = document.getElementById('backendUrl').value;
