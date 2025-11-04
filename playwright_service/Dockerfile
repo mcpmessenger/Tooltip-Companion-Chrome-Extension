@@ -77,6 +77,9 @@ COPY server.js ./
 COPY mcp-server.js ./
 COPY logger.js ./
 COPY eng.traineddata ./
+COPY extractors/ ./extractors/
+COPY handlers/ ./handlers/
+COPY processors/ ./processors/
 
 # Expose port
 EXPOSE 3000
