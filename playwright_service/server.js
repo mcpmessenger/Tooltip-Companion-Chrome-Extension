@@ -380,6 +380,7 @@ function analyzePageContent(text, url) {
     if (lowerText.includes('privacy') || lowerText.includes('terms')) topics.push('legal');
     
     analysis.keyTopics = topics;
+    
     analysis.confidence = Math.min(0.9, topics.length * 0.2 + (analysis.pageType !== 'unknown' ? 0.3 : 0));
     
     return analysis;
@@ -957,12 +958,24 @@ app.post('/chat', async (req, res) => {
     try {
         chatLogger.debug({ event: 'chat.payload', headers: req.headers, method: req.method }, 'Chat request metadata received');
         
-        const { message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs } = req.body;
+        const { message, originalMessage, currentUrl, url, openaiKey, tooltipHistory, tooltipContexts, pageInfo, consoleLogs } = req.body;
         const actualUrl = currentUrl || url;
         
-        chatLogger.debug({ event: 'chat.url_parsed', currentUrl, url, actualUrl }, 'Parsed chat URL fields');
+        // Use enhanced message if provided, otherwise fall back to original
+        const messageToUse = message || originalMessage;
         
-        if (!message) {
+        chatLogger.debug({ 
+            event: 'chat.url_parsed', 
+            currentUrl, 
+            url, 
+            actualUrl,
+            hasEnhancedMessage: !!message,
+            hasOriginalMessage: !!originalMessage,
+            tooltipContextsCount: tooltipContexts?.length || 0,
+            tooltipHistoryCount: tooltipHistory?.length || 0
+        }, 'Parsed chat URL fields and context');
+        
+        if (!messageToUse) {
             chatLogger.warn({ event: 'chat.validation_error' }, 'Missing message parameter');
             return res.status(400).json({
                 error: 'Missing message parameter',
@@ -974,11 +987,27 @@ app.post('/chat', async (req, res) => {
             event: 'chat.request_details',
             hasUserKey: !!openaiKey,
             hasBackendKey: !!process.env.OPENAI_API_KEY,
-            url: actualUrl || 'none'
-        }, 'Chat message received');
+            url: actualUrl || 'none',
+            tooltipContextsCount: tooltipContexts?.length || 0,
+            tooltipHistoryCount: tooltipHistory?.length || 0
+        }, 'Chat message received with tooltip context');
+        
+        // Log tooltip context details for debugging
+        if (tooltipContexts && tooltipContexts.length > 0) {
+            chatLogger.debug({
+                event: 'chat.tooltip_context_details',
+                contexts: tooltipContexts.map(ctx => ({
+                    url: ctx.url,
+                    hasOCR: !!ctx.ocrText,
+                    ocrLength: ctx.ocrText?.length || 0,
+                    hasAnalysis: !!ctx.analysis,
+                    pageType: ctx.analysis?.pageType || 'unknown'
+                }))
+            }, 'Tooltip context details');
+        }
         
         // Use shared chat processing function
-        const result = await processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs, chatLogger);
+        const result = await processChatRequest(messageToUse, currentUrl, url, openaiKey, tooltipHistory, tooltipContexts, pageInfo, consoleLogs, chatLogger);
         
         res.json(result);
         
@@ -1101,16 +1130,58 @@ app.use((err, req, res, next) => {
 });
 
 // Extract chat logic into reusable function
-async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, pageInfo, consoleLogs, requestLogger = logger) {
+async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, tooltipContexts, pageInfo, consoleLogs, requestLogger = logger) {
     const chatLogger = requestLogger?.child ? requestLogger.child({ event_scope: 'chat.processor' }) : logger.child({ event_scope: 'chat.processor' });
     const actualUrl = currentUrl || url;
     
+    // Build comprehensive context from tooltip contexts
+    let tooltipContextInfo = '';
+    if (tooltipContexts && Array.isArray(tooltipContexts) && tooltipContexts.length > 0) {
+        chatLogger.debug({ event: 'chat.tooltip_context_processing', count: tooltipContexts.length }, 'Processing tooltip contexts');
+        
+        tooltipContextInfo = '\n\n**=== TOOLTIP PREVIEW DATA (Use this to answer questions) ===**\n';
+        tooltipContexts.forEach((context, index) => {
+            if (context && context.url) {
+                tooltipContextInfo += `\n**Page ${index + 1}: ${context.url}**\n`;
+                
+                if (context.analysis) {
+                    const analysis = context.analysis;
+                    tooltipContextInfo += `Page Type: ${analysis.pageType || 'unknown'}`;
+                    if (analysis.confidence) {
+                        tooltipContextInfo += ` (${Math.round(analysis.confidence * 100)}% confidence)`;
+                    }
+                    tooltipContextInfo += '\n';
+                    
+                    if (analysis.keyTopics && analysis.keyTopics.length > 0) {
+                        tooltipContextInfo += `Key Topics: ${analysis.keyTopics.join(', ')}\n`;
+                    }
+                    
+                    if (analysis.suggestedActions && analysis.suggestedActions.length > 0) {
+                        tooltipContextInfo += `**Available Actions:** ${analysis.suggestedActions.join('; ')}\n`;
+                    }
+                }
+                
+                if (context.ocrText && context.ocrText.trim().length > 0) {
+                    const ocrPreview = context.ocrText.length > 800 
+                        ? context.ocrText.substring(0, 800) + '...' 
+                        : context.ocrText;
+                    tooltipContextInfo += `**Page Content (OCR):** ${ocrPreview}\n`;
+                }
+                
+                if (context.elementText) {
+                    tooltipContextInfo += `Element Text: ${context.elementText}\n`;
+                }
+            }
+        });
+        tooltipContextInfo += '\n**=== END TOOLTIP DATA ===**\n';
+    }
+    
     // Get context from current page if available
-    let contextInfo = '';
+    let currentPageContext = '';
     if (actualUrl) {
         const analysis = pageAnalysisCache.get(actualUrl);
         if (analysis) {
-            contextInfo = `\n\nCurrent page context:\n- Page type: ${analysis.pageType}\n- Key topics: ${analysis.keyTopics.join(', ') || 'none'}\n- Suggestions: ${analysis.suggestedActions.join('; ') || 'none'}`;
+            currentPageContext = `\n\n**Current Page Context:**\n- Page type: ${analysis.pageType}\n- Key topics: ${analysis.keyTopics.join(', ') || 'none'}\n- Suggestions: ${analysis.suggestedActions.join('; ') || 'none'}`;
         }
     }
     
@@ -1129,10 +1200,43 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
         chatLogger.info({ event: 'chat.openai_call' }, 'Calling OpenAI API for chat response');
         try {
             // Prepare messages for OpenAI
+            const systemPrompt = `You are a tech support and browsing assistant for the Tooltip Companion browser extension. Your PRIMARY role is to help users accomplish tasks on websites by providing clear, step-by-step instructions.
+
+**CORE PURPOSE:**
+You are a page-aware assistant. You understand what pages contain, what actions are available, and can guide users through completing tasks step-by-step.
+
+**YOUR CAPABILITIES:**
+1. **Task Guidance**: Provide numbered, step-by-step instructions for tasks (opening accounts, checkout, applications, etc.)
+2. **Page Awareness**: Understand what page the user is viewing from tooltip previews
+3. **Content Understanding**: Use OCR text to understand actual page content
+4. **Action Detection**: Identify available actions and buttons from page content
+
+**TOOLTIP PREVIEW DATA AVAILABLE:**
+- OCR text from page screenshots (actual visible content)
+- Page type analysis (banking, ecommerce, login, etc.)
+- Key topics, suggested actions, rates, bonuses, requirements
+
+**HOW TO RESPOND:**
+1. **For "how do I" questions**: Provide clear, numbered step-by-step instructions based on page content
+2. **For "what can I do" questions**: List specific available actions with clear descriptions
+3. **For task questions**: Infer steps from OCR content and page analysis
+4. **Always be specific**: Reference actual button labels, form fields, and actions from OCR text
+5. **Be actionable**: Tell users exactly what to click, fill, enter, or do next
+6. **Reference tooltip data**: Use the OCR content to understand what's actually on the page
+
+**EXAMPLES:**
+- "How do I open an account?" → "1. Click the 'Open online' or 'Get started' button. 2. Fill in your personal information... 3. Make qualifying direct deposits..."
+- "What does this button do?" → Explain based on page context and surrounding OCR text
+- "How do I checkout?" → "1. Review items in cart. 2. Click 'Proceed to checkout'. 3. Enter shipping info..."
+
+${tooltipContextInfo ? `\n**=== TOOLTIP PREVIEW DATA (Use this to answer questions) ===**\n${tooltipContextInfo}\n` : ''}${currentPageContext ? `\n**Current Page Context:**\n${currentPageContext}\n` : ''}
+
+Remember: You are a WORKFLOW ASSISTANT. Help users accomplish tasks by providing clear, actionable, step-by-step instructions based on actual page content from tooltip previews.`;
+
             const messages = [
                 {
                     role: 'system',
-                    content: `You are a helpful assistant for the Tooltip Companion browser extension. You help users understand web pages by analyzing screenshots and providing context-aware assistance.${contextInfo ? '\n\nUser is currently on a page with this context:' + contextInfo : ''}`
+                    content: systemPrompt
                 },
                 {
                     role: 'user',
@@ -1150,7 +1254,7 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
                 body: JSON.stringify({
                     model: 'gpt-3.5-turbo',
                     messages: messages,
-                    max_tokens: 500,
+                    max_tokens: 800, // Increased for more detailed responses
                     temperature: 0.7
                 })
             });
@@ -1185,22 +1289,127 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
     let response;
     const lowerMessage = message.toLowerCase();
     
+    // Check if we have tooltip context to work with
+    const hasTooltipContext = tooltipContexts && tooltipContexts.length > 0;
+    
     if (lowerMessage.includes('hello') || lowerMessage.includes('hi') || lowerMessage.includes('hey')) {
-        response = `Hello! 👋 I'm your Smart Tooltip Companion. I can analyze web pages using OCR and provide intelligent insights about what you're viewing.${contextInfo}`;
+        if (hasTooltipContext) {
+            const latest = tooltipContexts[tooltipContexts.length - 1];
+            response = `Hello! 👋 I can see you've been viewing pages. Based on your recent tooltip previews, I can tell you about:\n\n`;
+            if (latest.analysis) {
+                response += `• Page types and content analysis\n`;
+                if (latest.analysis.suggestedActions && latest.analysis.suggestedActions.length > 0) {
+                    response += `• Available actions on pages\n`;
+                }
+            }
+            response += `• OCR text from page screenshots\n`;
+            response += `• Specific details like rates, bonuses, and requirements\n\n`;
+            response += `Try asking: "what can I do on this page" or "tell me about these offers"`;
+        } else {
+            response = `Hello! 👋 I'm your Smart Tooltip Companion. I can analyze web pages using OCR and provide intelligent insights about what you're viewing.`;
+        }
+    } else if (lowerMessage.includes('what can i do') || lowerMessage.includes('what can you tell me') || lowerMessage.includes('what can you')) {
+        if (hasTooltipContext) {
+            response = `Based on the tooltip previews you've viewed, here's what you can do:\n\n`;
+            tooltipContexts.forEach((ctx, idx) => {
+                if (ctx.analysis && ctx.analysis.suggestedActions && ctx.analysis.suggestedActions.length > 0) {
+                    response += `**${ctx.url}**\n`;
+                    ctx.analysis.suggestedActions.forEach(action => {
+                        response += `• ${action}\n`;
+                    });
+                    response += '\n';
+                }
+            });
+            if (tooltipContexts.some(ctx => ctx.ocrText)) {
+                response += `\nI can also explain:\n• What the pages contain (from OCR text)\n• Specific offers, rates, or requirements\n• Page types and purposes\n`;
+            }
+        } else {
+            response = `Hover over links to see tooltip previews, then I can tell you what you can do on those pages based on the content.`;
+        }
+    } else if (lowerMessage.includes('tell me about') || lowerMessage.includes('what are these') || lowerMessage.includes('about these offers')) {
+        if (hasTooltipContext) {
+            response = `Based on your tooltip previews, here's what I found:\n\n`;
+            tooltipContexts.forEach((ctx, idx) => {
+                response += `**Page ${idx + 1}: ${ctx.url}**\n`;
+                if (ctx.analysis) {
+                    response += `Type: ${ctx.analysis.pageType || 'unknown'}\n`;
+                    if (ctx.analysis.keyTopics && ctx.analysis.keyTopics.length > 0) {
+                        response += `Topics: ${ctx.analysis.keyTopics.join(', ')}\n`;
+                    }
+                }
+                if (ctx.ocrText) {
+                    const preview = ctx.ocrText.substring(0, 300);
+                    response += `Content: ${preview}${ctx.ocrText.length > 300 ? '...' : ''}\n`;
+                }
+                response += '\n';
+            });
+        } else {
+            response = `Hover over links to see tooltip previews, then I can tell you about the pages and offers.`;
+        }
+    } else if (lowerMessage.includes('button') && (lowerMessage.includes('do') || lowerMessage.includes('what'))) {
+        if (hasTooltipContext) {
+            const latest = tooltipContexts[tooltipContexts.length - 1];
+            if (latest.analysis && latest.analysis.suggestedActions && latest.analysis.suggestedActions.length > 0) {
+                response = `Based on the page preview, the buttons/links allow you to:\n\n`;
+                latest.analysis.suggestedActions.forEach(action => {
+                    response += `• ${action}\n`;
+                });
+            } else if (latest.ocrText) {
+                const preview = latest.ocrText.substring(0, 200);
+                response = `Based on the page content, this page appears to be about:\n\n${preview}...\n\n`;
+                response += `To see specific actions, I'd need more detailed analysis.`;
+            } else {
+                response = `I can see you viewed a page, but I need more context. Try asking "what can I do on this page".`;
+            }
+        } else {
+            response = `Hover over the button/link to see a tooltip preview, then I can tell you what it does based on the page content.`;
+        }
     } else if (lowerMessage.includes('analyze') || lowerMessage.includes('what is this page')) {
         if (actualUrl && pageAnalysisCache.has(actualUrl)) {
             const analysis = pageAnalysisCache.get(actualUrl);
             response = `📊 Page Analysis for ${actualUrl}:\n• Type: ${analysis.pageType}\n• Confidence: ${Math.round(analysis.confidence * 100)}%\n• Key Topics: ${analysis.keyTopics.join(', ') || 'none'}\n• Suggestions: ${analysis.suggestedActions.join('; ') || 'none'}`;
+        } else if (hasTooltipContext) {
+            const latest = tooltipContexts[tooltipContexts.length - 1];
+            response = `📊 Analysis of latest page:\n`;
+            if (latest.analysis) {
+                response += `• Type: ${latest.analysis.pageType || 'unknown'}\n`;
+                response += `• Key Topics: ${latest.analysis.keyTopics?.join(', ') || 'none'}\n`;
+                response += `• Suggested Actions: ${latest.analysis.suggestedActions?.join('; ') || 'none'}\n`;
+            }
+            if (latest.ocrText) {
+                const preview = latest.ocrText.substring(0, 150);
+                response += `\nContent preview: ${preview}...`;
+            }
         } else {
             response = `I can analyze pages! Hover over a link to capture a screenshot, then ask me to analyze it.`;
         }
     } else if (lowerMessage.includes('tooltip') || lowerMessage.includes('screenshot')) {
-        response = `The smart tooltip system now includes:\n• OCR text extraction from screenshots\n• Intelligent page type detection\n• Proactive suggestions based on content\n• Context-aware chat responses${contextInfo}`;
+        const contextNote = tooltipContextInfo || currentPageContext ? '\n\n' + (tooltipContextInfo || '') + (currentPageContext || '') : '';
+        response = `The smart tooltip system now includes:\n• OCR text extraction from screenshots\n• Intelligent page type detection\n• Proactive suggestions based on content\n• Context-aware chat responses${contextNote}`;
     } else if (lowerMessage.includes('help')) {
-        response = `I can help you with:\n• 🔍 Page analysis (OCR + AI insights)\n• 📸 Smart tooltips with context\n• 🧠 Proactive suggestions\n• 💬 Context-aware chat\n\nTry: "analyze this page" or "what type of page is this?"${contextInfo}`;
+        const contextNote = tooltipContextInfo || currentPageContext ? '\n\n' + (tooltipContextInfo || '') + (currentPageContext || '') : '';
+        response = `I can help you with:\n• 🔍 Page analysis (OCR + AI insights)\n• 📸 Smart tooltips with context\n• 🧠 Proactive suggestions\n• 💬 Context-aware chat\n\nTry: "analyze this page" or "what type of page is this?"${contextNote}`;
     } else {
-        // More helpful fallback message that doesn't assume user needs to add key
-        response = `I received your message: "${message}". I'm equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.${contextInfo}\n\nNote: For enhanced AI responses, ensure the backend has an OpenAI API key configured.`;
+        // More helpful fallback message that uses tooltip context if available
+        if (hasTooltipContext) {
+            const latest = tooltipContexts[tooltipContexts.length - 1];
+            response = `I see you asked: "${message}". Based on your recent tooltip previews:\n\n`;
+            if (latest.analysis) {
+                response += `The latest page you viewed is a ${latest.analysis.pageType || 'page'}`;
+                if (latest.analysis.keyTopics && latest.analysis.keyTopics.length > 0) {
+                    response += ` about ${latest.analysis.keyTopics.slice(0, 2).join(' and ')}`;
+                }
+                response += '.\n\n';
+            }
+            if (latest.ocrText) {
+                const preview = latest.ocrText.substring(0, 200);
+                response += `Page content: ${preview}...\n\n`;
+            }
+            response += `For more specific answers, try:\n• "what can I do on this page"\n• "tell me about these offers"\n• "what does this button do"`;
+        } else {
+            const contextNote = tooltipContextInfo || currentPageContext ? '\n\n' + (tooltipContextInfo || '') + (currentPageContext || '') : '';
+            response = `I received your message: "${message}". I'm equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.${contextNote}\n\nNote: For enhanced AI responses, ensure the backend has an OpenAI API key configured.`;
+        }
     }
     
     return {
@@ -1217,13 +1426,14 @@ const mcpServer = new MCPServer(
         return await captureScreenshot(url, options);
     },
     // chatHandler
-    async ({ message, currentUrl, openaiKey, tooltipHistory }) => {
+    async ({ message, currentUrl, openaiKey, tooltipHistory, tooltipContexts }) => {
         return await processChatRequest(
             message,
             currentUrl,
             currentUrl, // url param
             openaiKey,
             tooltipHistory,
+            tooltipContexts, // Pass tooltip contexts
             null, // pageInfo
             null,  // consoleLogs
             logger.child({ scope: 'chat.mcp' })

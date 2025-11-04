@@ -95,12 +95,31 @@ Operation **Juicebox 🧃** is the multi-phase initiative to raise the Tooltip C
 | 2025-11-03 | Fixed Buffer normalization & MCP CSP support | `content.js`, `playwright_service/mcp-server.js`, `mcp-client.js`, `background.js` |
 | 2025-11-03 | Created `operation-juicebox-v1.5` branch with Phase 1 & Phase 2 CSP fixes | Branch pushed to GitHub |
 | 2025-11-03 | Deployed CloudWatch alarms & completed ECS capacity review | `infra/operation-juicebox/deploy-alarms.ps1`, `review-ecs-capacity.ps1`, CloudFormation stack created |
+| 2025-01-03 | Enhanced chat intelligence & unified template system | `tooltip-template.js`, improved `content.js` chat context awareness |
+| 2025-01-03 | Workflow analysis enhancement (experimental) | Workflow detection, step extraction, workflow-focused system prompt - **NOT YET DEPLOYED** |
 
 ## Next Actions
 
-1. **Deploy backend to production** - Push resilience patterns + CSP fallback to ECS (Phase 1 complete, alarms deployed)
+1. **Deploy Phase 1 & 2 to production** - Push resilience patterns + CSP fallback to ECS (alarms already deployed)
 2. **Continue Phase 2** - Implement signed URLs for `/screenshot/:token` security
 3. **Address ECS capacity findings** - Increase desired count to 2+, extend health check grace period to 60s+
-4. **Start Phase 3** - Set up automated testing and CI/CD pipeline
+4. **Test workflow analysis locally** - Validate workflow detection before production deployment
+5. **Start Phase 3** - Set up automated testing and CI/CD pipeline
+
+## Current Development Status
+
+**✅ Ready for Production Deployment:**
+- Phase 1: Backend stabilization (logging, retry, circuit breaker)
+- Phase 2: CSP-aware fallback (data URIs, buffer normalization)
+- CloudWatch alarms deployed
+- Unified template system (`tooltip-template.js`)
+- Enhanced chat intelligence (context-aware responses)
+
+**🧪 Experimental (Not Ready for Deployment):**
+- Workflow detection and analysis (new feature, needs testing)
+- Enhanced system prompt for workflow guidance
+- Workflow step extraction from page content
+
+See `docs/OPERATION_JUICEBOX_STATUS.md` for detailed deployment strategy.
 
 
