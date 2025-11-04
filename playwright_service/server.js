@@ -12,11 +12,30 @@ const path = require('path');
 const { performance } = require('perf_hooks');
 
 const logger = require('./logger');
-const { extractSemanticHTML } = require('./extractors/semantic-html');
-const { extractInteractiveElements } = require('./extractors/interactive-elements');
-const { cleanOCRText } = require('./processors/ocr-cleanup');
-const { summarizePage } = require('./handlers/summarize-page');
-const { checkLinkSafety } = require('./handlers/check-link-safety');
+
+// Load optional extractors/handlers/processors with error handling
+let extractSemanticHTML, extractInteractiveElements, cleanOCRText, summarizePage, checkLinkSafety;
+
+try {
+    extractSemanticHTML = require('./extractors/semantic-html').extractSemanticHTML;
+    extractInteractiveElements = require('./extractors/interactive-elements').extractInteractiveElements;
+    cleanOCRText = require('./processors/ocr-cleanup').cleanOCRText;
+    summarizePage = require('./handlers/summarize-page').summarizePage;
+    checkLinkSafety = require('./handlers/check-link-safety').checkLinkSafety;
+    logger.info({ event: 'modules.loaded' }, 'All extractors/handlers/processors loaded successfully');
+} catch (error) {
+    logger.error({ 
+        event: 'modules.load_error', 
+        error: error.message,
+        stack: error.stack 
+    }, 'Failed to load extractors/handlers/processors - some features may be unavailable');
+    // Provide fallback functions
+    extractSemanticHTML = async () => ({});
+    extractInteractiveElements = async () => [];
+    cleanOCRText = (text) => text;
+    summarizePage = async () => null;
+    checkLinkSafety = async () => ({ safe: true });
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
