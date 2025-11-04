@@ -60,24 +60,22 @@ function renderTooltipTemplate(data, options = {}) {
 
     let html = `<div class="${containerClass}" data-mode="${mode}">`;
 
-    // Header: Metadata section
-    if (showMetadata && analysis) {
+    // Header: Metadata section (emojis removed per user request)
+    if (showMetadata && analysis && mode === 'chat') {
+        // Only show metadata in chat mode, not in tooltip mode
         html += `
             <div class="template-header">
                 <div class="template-page-type">
-                    <span class="template-icon">${pageTypeIcon}</span>
                     <span class="template-page-type-name">${pageType.charAt(0).toUpperCase() + pageType.slice(1)}</span>
                     ${confidence > 50 ? `<span class="template-confidence">${confidence}%</span>` : ''}
                 </div>
                 ${keyTopics.length > 0 ? `
                     <div class="template-topics">
-                        <span class="template-icon-small">📌</span>
                         <span class="template-topics-text">${keyTopics.slice(0, 3).join(' • ')}</span>
                     </div>
                 ` : ''}
                 ${suggestedActions.length > 0 ? `
                     <div class="template-actions">
-                        <span class="template-icon-small">💡</span>
                         <span class="template-actions-text">${suggestedActions[0]}</span>
                     </div>
                 ` : ''}
@@ -85,9 +83,10 @@ function renderTooltipTemplate(data, options = {}) {
         `;
     }
 
-    // Screenshot section
+    // Screenshot section - Screenshot only, no emojis in this section
     if (shouldShowScreenshot && screenshotUrl) {
-        const screenshotMaxHeight = isCompact ? '150px' : '200px';
+        // Make screenshot bigger - use larger height for tooltip mode
+        const screenshotMaxHeight = isCompact ? '200px' : '400px'; // Increased from 150px/200px
         html += `
             <div class="template-screenshot-container">
                 <img src="${screenshotUrl}" 
@@ -99,11 +98,9 @@ function renderTooltipTemplate(data, options = {}) {
                      data-using-data-uri="${usedDataUri ? 'true' : 'false'}"
                      style="max-height: ${screenshotMaxHeight};">
                 <div class="template-screenshot-error" style="display: none;">
-                    <span class="template-icon-small">⚠️</span>
                     <span>Screenshot unavailable</span>
                 </div>
                 <div class="template-screenshot-loading" style="display: none;">
-                    <span class="template-icon-small">📸</span>
                     <span>Loading preview...</span>
                 </div>
             </div>
@@ -112,34 +109,17 @@ function renderTooltipTemplate(data, options = {}) {
         html += `
             <div class="template-screenshot-container">
                 <div class="template-screenshot-loading">
-                    <span class="template-icon-small">📸</span>
                     <span>Loading preview...</span>
                 </div>
             </div>
         `;
     }
 
-    // OCR Text section (compact mode or chat, or when explicitly requested)
-    if ((isCompact || mode === 'chat') && text && text.trim().length > 0) {
-        const previewText = text.substring(0, 150) + (text.length > 150 ? '...' : '');
-        html += `
-            <div class="template-text-preview">
-                <span class="template-icon-small">📝</span>
-                <span class="template-text-content">${escapeHtml(previewText)}</span>
-            </div>
-        `;
-    }
+    // OCR Text section removed - will be replaced with AI summary in chat
+    // This section is no longer used as we want AI summary instead of raw OCR/HTML
 
-    // URL footer (for chat mode)
-    if (mode === 'chat' && url) {
-        html += `
-            <div class="template-url-footer">
-                <a href="${url}" target="_blank" rel="noopener noreferrer" class="template-url-link">
-                    ${url}
-                </a>
-            </div>
-        `;
-    }
+    // URL footer removed - links are already available on the page being browsed
+    // (Previously shown in chat mode, but removed per user request)
 
     html += `</div>`;
 
@@ -284,8 +264,17 @@ function getTemplateStyles(mode = 'tooltip') {
                 display: block;
                 width: 100%;
                 height: auto;
-                object-fit: cover;
+                object-fit: contain;
                 border-radius: 0;
+            }
+            
+            /* Make screenshot bigger in tooltip mode (not chat) */
+            .tooltip-template-popup .template-screenshot {
+                max-height: 400px !important;
+            }
+            
+            .tooltip-template-chat .template-screenshot {
+                max-height: 150px;
             }
 
             .template-screenshot-error,
