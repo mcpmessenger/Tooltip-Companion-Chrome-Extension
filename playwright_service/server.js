@@ -12,6 +12,11 @@ const path = require('path');
 const { performance } = require('perf_hooks');
 
 const logger = require('./logger');
+const { extractSemanticHTML } = require('./extractors/semantic-html');
+const { extractInteractiveElements } = require('./extractors/interactive-elements');
+const { cleanOCRText } = require('./processors/ocr-cleanup');
+const { summarizePage } = require('./handlers/summarize-page');
+const { checkLinkSafety } = require('./handlers/check-link-safety');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -801,6 +806,56 @@ async function captureScreenshot(url, options = {}) {
                 }, 'Failed to extract HTML metadata, continuing without it');
             }
 
+            // Phase 2: Extract semantic HTML content
+            let semanticContent = null;
+            try {
+                attemptLogger.debug({ event: 'capture.semantic_extraction.start' }, 'Starting semantic HTML extraction');
+                semanticContent = await extractSemanticHTML(page, {
+                    maxMainContentLength: 5000,
+                    maxArticleLength: 3000,
+                    maxSectionLength: 2000,
+                    includeStructuredData: true,
+                    includeNavigation: false
+                });
+                
+                attemptLogger.debug({
+                    event: 'capture.semantic_extraction.success',
+                    hasMainContent: !!semanticContent.mainContent,
+                    articlesCount: semanticContent.articles?.length || 0,
+                    sectionsCount: semanticContent.sections?.length || 0,
+                    hasStructuredData: !!semanticContent.structuredData
+                }, 'Semantic HTML extraction completed');
+            } catch (semanticError) {
+                attemptLogger.warn({
+                    event: 'capture.semantic_extraction_error',
+                    error: semanticError.message
+                }, 'Failed to extract semantic HTML, continuing without it');
+            }
+
+            // Phase 2: Extract interactive elements
+            let interactiveElements = null;
+            try {
+                attemptLogger.debug({ event: 'capture.interactive_extraction.start' }, 'Starting interactive elements extraction');
+                interactiveElements = await extractInteractiveElements(page, {
+                    maxButtons: 50,
+                    maxForms: 10,
+                    maxLinks: 100,
+                    includeHidden: false
+                });
+                
+                attemptLogger.debug({
+                    event: 'capture.interactive_extraction.success',
+                    buttonsCount: interactiveElements.buttons?.length || 0,
+                    formsCount: interactiveElements.forms?.length || 0,
+                    linksCount: interactiveElements.links?.length || 0
+                }, 'Interactive elements extraction completed');
+            } catch (interactiveError) {
+                attemptLogger.warn({
+                    event: 'capture.interactive_extraction_error',
+                    error: interactiveError.message
+                }, 'Failed to extract interactive elements, continuing without it');
+            }
+
             // Phase 3: Capture full-page screenshot for visual analysis
             // Capture both viewport (for tooltip display) and full-page (for vision model)
             const viewportScreenshot = await page.screenshot({
@@ -841,6 +896,15 @@ async function captureScreenshot(url, options = {}) {
             const diskScreenshotUrl = token ? getScreenshotUrl(token) : null;
             const extractedText = await extractTextFromScreenshot(screenshot);
             
+            // Phase 2: Clean and preprocess OCR text
+            const ocrData = cleanOCRText(extractedText, {
+                removeArtifacts: true,
+                normalizeWhitespace: true,
+                removeDuplicates: true,
+                filterBoilerplate: true,
+                extractStructuredData: true
+            });
+            
             // Phase 3: Analyze full-page screenshot with vision model (GPT-4V)
             let visualSummary = null;
             if (fullPageScreenshot) {
@@ -862,6 +926,8 @@ async function captureScreenshot(url, options = {}) {
                     analysis.visualSummary = visualSummary;
                 }
             }
+
+            // Phase 2: Semantic content is already extracted above and included in response payload
 
             const base64Screenshot = screenshot.toString('base64');
             const dataUri = `data:image/png;base64,${base64Screenshot}`;
@@ -918,8 +984,18 @@ async function captureScreenshot(url, options = {}) {
                 screenshotUrl: finalResponseUrl,
                 dataUri: dataUri,
                 analysis,
-                text: extractedText,
-                originalUrl: diskScreenshotUrl || screenshotUrl
+                text: extractedText, // Keep original for backward compatibility
+                // Phase 2: Add cleaned OCR data
+                ocrData: ocrData || null,
+                originalUrl: diskScreenshotUrl || screenshotUrl,
+                // Phase 2: Add semantic content
+                semantic: semanticContent || null,
+                // Phase 2: Add interactive elements
+                interactive: interactiveElements || null,
+                // Include HTML metadata for backward compatibility
+                title: htmlMetadata.title || '',
+                description: htmlMetadata.metaDescription || '',
+                headings: htmlMetadata.h1Tags || []
             };
 
             return responsePayload;
@@ -1366,8 +1442,11 @@ app.post('/chat', async (req, res) => {
             }, 'Tooltip context details');
         }
         
+        // Get chat history from request (optional, for memory/context)
+        const chatHistory = req.body.chatHistory || [];
+        
         // Use shared chat processing function
-        const result = await processChatRequest(messageToUse, currentUrl, url, openaiKey, tooltipHistory, tooltipContexts, pageInfo, consoleLogs, chatLogger);
+        const result = await processChatRequest(messageToUse, currentUrl, url, openaiKey, tooltipHistory, tooltipContexts, pageInfo, consoleLogs, chatHistory, chatLogger);
         
         res.json(result);
         
@@ -1490,7 +1569,7 @@ app.use((err, req, res, next) => {
 });
 
 // Extract chat logic into reusable function
-async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, tooltipContexts, pageInfo, consoleLogs, requestLogger = logger) {
+async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHistory, tooltipContexts, pageInfo, consoleLogs, chatHistory = [], requestLogger = logger) {
     const chatLogger = requestLogger?.child ? requestLogger.child({ event_scope: 'chat.processor' }) : logger.child({ event_scope: 'chat.processor' });
     const actualUrl = currentUrl || url;
     
@@ -1638,41 +1717,53 @@ You are a page-aware assistant. You understand what pages contain, what actions 
 3. **Content Understanding**: Use OCR text to understand actual page content
 4. **Action Detection**: Identify available actions and buttons from page content
 
-**TOOLTIP PREVIEW DATA AVAILABLE:**
-- OCR text from page screenshots (actual visible content)
-- Page type analysis (banking, ecommerce, login, etc.)
-- Key topics, suggested actions, rates, bonuses, requirements
-- HTML metadata (page title, description, headings)
-- Visual analysis (layout, design style, color scheme, key visual elements)
-- Semantic analysis (page purpose, sentiment, call-to-actions)
-
 **HOW TO RESPOND:**
 1. **For "how do I" questions**: Provide clear, numbered step-by-step instructions based on page content
 2. **For "what can I do" questions**: List specific available actions with clear descriptions
 3. **For task questions**: Infer steps from OCR content and page analysis
 4. **Always be specific**: Reference actual button labels, form fields, and actions from OCR text
 5. **Be actionable**: Tell users exactly what to click, fill, enter, or do next
-6. **Reference tooltip data**: Use the OCR content to understand what's actually on the page
+6. **Use the data below**: The tooltip preview data contains the actual page content - use it to answer questions directly and helpfully
+7. **DO NOT** repeat or echo internal data structures, headers, or metadata - just provide helpful answers based on the content
 
 **EXAMPLES:**
 - "How do I open an account?" → "1. Click the 'Open online' or 'Get started' button. 2. Fill in your personal information... 3. Make qualifying direct deposits..."
 - "What does this button do?" → Explain based on page context and surrounding OCR text
 - "How do I checkout?" → "1. Review items in cart. 2. Click 'Proceed to checkout'. 3. Enter shipping info..."
+- "what's that mean" → Explain the content directly based on the OCR text and page analysis
 
-${tooltipContextInfo ? `\n**=== TOOLTIP PREVIEW DATA (Use this to answer questions) ===**\n${tooltipContextInfo}\n` : ''}${currentPageContext ? `\n**Current Page Context:**\n${currentPageContext}\n` : ''}
+${tooltipContextInfo ? `\n**PAGE CONTEXT DATA (Use this to answer questions - do not echo these headers):**\n${tooltipContextInfo}\n` : ''}${currentPageContext ? `\n**Current Page Context:**\n${currentPageContext}\n` : ''}
 
-Remember: You are a WORKFLOW ASSISTANT. Help users accomplish tasks by providing clear, actionable, step-by-step instructions based on actual page content from tooltip previews.`;
+Remember: You are a WORKFLOW ASSISTANT. Help users accomplish tasks by providing clear, actionable, step-by-step instructions based on actual page content from tooltip previews. Answer questions directly and helpfully without repeating internal data structures.`;
 
+            // Build messages array with chat history for context
             const messages = [
                 {
                     role: 'system',
                     content: systemPrompt
-                },
-                {
-                    role: 'user',
-                    content: message
                 }
             ];
+            
+            // Add chat history (last 10 messages for context, but keep total under token limit)
+            if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
+                // Include recent conversation history (last 10 messages)
+                const recentHistory = chatHistory.slice(-10);
+                recentHistory.forEach(msg => {
+                    if (msg.role && msg.content) {
+                        messages.push({
+                            role: msg.role, // 'user' or 'assistant'
+                            content: msg.content
+                        });
+                    }
+                });
+                chatLogger.debug({ event: 'chat.history_included', count: recentHistory.length }, 'Included chat history for context');
+            }
+            
+            // Add current user message
+            messages.push({
+                role: 'user',
+                content: message
+            });
             
             // Call OpenAI API
             const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -1813,12 +1904,8 @@ Remember: You are a WORKFLOW ASSISTANT. Help users accomplish tasks by providing
         } else {
             response = `I can analyze pages! Hover over a link to capture a screenshot, then ask me to analyze it.`;
         }
-    } else if (lowerMessage.includes('tooltip') || lowerMessage.includes('screenshot')) {
-        const contextNote = tooltipContextInfo || currentPageContext ? '\n\n' + (tooltipContextInfo || '') + (currentPageContext || '') : '';
-        response = `The smart tooltip system now includes:\n• OCR text extraction from screenshots\n• Intelligent page type detection\n• Proactive suggestions based on content\n• Context-aware chat responses${contextNote}`;
     } else if (lowerMessage.includes('help')) {
-        const contextNote = tooltipContextInfo || currentPageContext ? '\n\n' + (tooltipContextInfo || '') + (currentPageContext || '') : '';
-        response = `I can help you with:\n• 🔍 Page analysis (OCR + AI insights)\n• 📸 Smart tooltips with context\n• 🧠 Proactive suggestions\n• 💬 Context-aware chat\n\nTry: "analyze this page" or "what type of page is this?"${contextNote}`;
+        response = `I can help you with:\n• 🔍 Page analysis (OCR + AI insights)\n• 📸 Smart tooltips with context\n• 🧠 Proactive suggestions\n• 💬 Context-aware chat\n\nTry: "analyze this page" or "what type of page is this?"`;
     } else {
         // More helpful fallback message that uses tooltip context if available
         if (hasTooltipContext) {
@@ -1837,8 +1924,7 @@ Remember: You are a WORKFLOW ASSISTANT. Help users accomplish tasks by providing
             }
             response += `For more specific answers, try:\n• "what can I do on this page"\n• "tell me about these offers"\n• "what does this button do"`;
         } else {
-            const contextNote = tooltipContextInfo || currentPageContext ? '\n\n' + (tooltipContextInfo || '') + (currentPageContext || '') : '';
-            response = `I received your message: "${message}". I'm equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.${contextNote}\n\nNote: For enhanced AI responses, ensure the backend has an OpenAI API key configured.`;
+            response = `I received your message: "${message}". I'm equipped with OCR and smart analysis! Ask me to analyze pages or explain what I can see.\n\nNote: For enhanced AI responses, ensure the backend has an OpenAI API key configured.`;
         }
     }
     
@@ -1850,13 +1936,24 @@ Remember: You are a WORKFLOW ASSISTANT. Help users accomplish tasks by providing
 }
 
 // Initialize MCP Server
+// Create handlers for Phase 3 features
+const createCaptureHandler = () => async (url, options = {}) => {
+    return await captureScreenshot(url, options);
+};
+
+const createSummarizeHandler = () => async (params, apiKey) => {
+    return await summarizePage(params, createCaptureHandler(), apiKey || BACKEND_OPENAI_API_KEY);
+};
+
+const createSafetyHandler = () => async (params, apiKey) => {
+    return await checkLinkSafety(params, createCaptureHandler(), apiKey || BACKEND_OPENAI_API_KEY);
+};
+
 const mcpServer = new MCPServer(
     // captureHandler
-    async (url, options = {}) => {
-        return await captureScreenshot(url, options);
-    },
+    createCaptureHandler(),
     // chatHandler
-    async ({ message, currentUrl, openaiKey, tooltipHistory, tooltipContexts }) => {
+    async ({ message, currentUrl, openaiKey, tooltipHistory, tooltipContexts, chatHistory }) => {
         return await processChatRequest(
             message,
             currentUrl,
@@ -1866,6 +1963,7 @@ const mcpServer = new MCPServer(
             tooltipContexts, // Pass tooltip contexts
             null, // pageInfo
             null,  // consoleLogs
+            chatHistory || [], // Pass chat history for memory
             logger.child({ scope: 'chat.mcp' })
         );
     },
@@ -1893,7 +1991,11 @@ const mcpServer = new MCPServer(
             analysis,
             cached: true
         };
-    }
+    },
+    // summarizeHandler (Phase 3)
+    createSummarizeHandler(),
+    // safetyHandler (Phase 3)
+    createSafetyHandler()
 );
 
 // MCP endpoint - JSON-RPC 2.0 over HTTP POST
