@@ -2,12 +2,14 @@
 // Implements JSON-RPC 2.0 server with MCP protocol support
 
 class MCPServer {
-    constructor(captureHandler, chatHandler, ocrHandler, analysisHandler) {
+    constructor(captureHandler, chatHandler, ocrHandler, analysisHandler, summarizeHandler = null, safetyHandler = null) {
         // Store handlers for backend functionality
         this.captureHandler = captureHandler;
         this.chatHandler = chatHandler;
         this.ocrHandler = ocrHandler;
         this.analysisHandler = analysisHandler;
+        this.summarizeHandler = summarizeHandler;
+        this.safetyHandler = safetyHandler;
 
         // Session management
         this.sessions = new Map();
@@ -85,6 +87,48 @@ class MCPServer {
                     },
                     required: ['url']
                 }
+            },
+            {
+                name: 'summarize_page',
+                description: 'Generate a concise summary of a page for chat display (targets ~20 words but allows natural completion)',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        url: {
+                            type: 'string',
+                            description: 'The URL to summarize'
+                        },
+                        maxLength: {
+                            type: 'number',
+                            description: 'Maximum summary length in characters (flexible, allows natural completion)',
+                            default: 500
+                        },
+                        targetWords: {
+                            type: 'number',
+                            description: 'Target word count for summary (default: 20, but allows natural completion up to ~100 words)',
+                            default: 20
+                        }
+                    },
+                    required: ['url']
+                }
+            },
+            {
+                name: 'check_link_safety',
+                description: 'Analyze link safety and relevance',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        url: {
+                            type: 'string',
+                            description: 'The URL to check'
+                        },
+                        context: {
+                            type: 'object',
+                            description: 'Current page context for comparison'
+                        }
+                    },
+                    required: ['url']
+                }
             }
         ];
 
@@ -94,6 +138,12 @@ class MCPServer {
                 uri: 'tooltip://context',
                 name: 'Tooltip Context',
                 description: 'Current tooltip browsing context',
+                mimeType: 'application/json'
+            },
+            {
+                uri: 'tooltip://summary/{url}',
+                name: 'Page Summary',
+                description: 'Cached page summary for a URL',
                 mimeType: 'application/json'
             }
         ];
@@ -108,6 +158,22 @@ class MCPServer {
                         name: 'url',
                         description: 'The URL to analyze',
                         required: true
+                    }
+                ]
+            },
+            {
+                name: 'suggest_actions',
+                description: 'Generate contextual action suggestions based on current page and hovered element',
+                arguments: [
+                    {
+                        name: 'url',
+                        description: 'The URL of the current page',
+                        required: true
+                    },
+                    {
+                        name: 'context',
+                        description: 'Current page context (optional)',
+                        required: false
                     }
                 ]
             }
@@ -168,7 +234,12 @@ class MCPServer {
                     break;
 
                 case 'resources/read':
-                    result = await this.handleResourceRead(params);
+                    // Handle summary resource separately
+                    if (params.uri && params.uri.startsWith('tooltip://summary/')) {
+                        result = await this.handleSummaryResourceRead(params);
+                    } else {
+                        result = await this.handleResourceRead(params);
+                    }
                     break;
 
                 case 'prompts/list':
@@ -279,19 +350,56 @@ class MCPServer {
                 });
                 const screenshotUrl = captureResult?.screenshotUrl || captureResult?.dataUri || null;
                 const screenshotDataUri = captureResult?.dataUri || (screenshotUrl && screenshotUrl.startsWith('data:image/') ? screenshotUrl : null);
+                
+                // Phase 1: Standardized Context Payload Structure
+                // Phase 2: Include semantic HTML content
+                const contextPayload = {
+                    page: {
+                        url: args.url,
+                        title: captureResult?.title || captureResult?.analysis?.htmlMetadata?.title || '',
+                        viewport: captureResult?.viewport || { width: 800, height: 600 },
+                        timestamp: new Date().toISOString()
+                    },
+                    content: {
+                        ocr: {
+                            text: captureResult?.text || captureResult?.ocrData?.text || '',
+                            cleaned: captureResult?.ocrData?.cleaned || captureResult?.text || '',
+                            confidence: captureResult?.ocrData?.confidence || 0.7,
+                            artifacts: captureResult?.ocrData?.artifacts || []
+                        },
+                        metadata: {
+                            title: captureResult?.title || captureResult?.analysis?.htmlMetadata?.title || '',
+                            description: captureResult?.description || captureResult?.analysis?.htmlMetadata?.metaDescription || '',
+                            headings: captureResult?.headings || captureResult?.analysis?.htmlMetadata?.h1Tags || []
+                        },
+                        semantic: captureResult?.semantic || undefined // Phase 2: Semantic HTML content
+                    },
+                    analysis: captureResult?.analysis || {
+                        pageType: 'unknown',
+                        keyTopics: [],
+                        suggestedActions: [],
+                        confidence: 0
+                    },
+                    interactive: captureResult?.interactive || undefined // Phase 2: Interactive elements
+                };
+                
                 return {
                     content: [
                         {
                             type: 'text',
                             text: JSON.stringify({
+                                // Screenshot data (backward compatibility)
                                 screenshot: captureResult?.dataUri || screenshotUrl,
                                 screenshotUrl: screenshotUrl,
                                 originalScreenshotUrl: captureResult?.originalUrl || screenshotUrl,
                                 screenshotDataUri,
+                                // Standardized context payload
+                                context: contextPayload,
+                                // Legacy fields (for backward compatibility)
                                 url: args.url,
-                                analysis: captureResult?.analysis || null,
-                                text: captureResult?.text || '',
-                                timestamp: new Date().toISOString()
+                                analysis: contextPayload.analysis,
+                                text: contextPayload.content.ocr.text,
+                                timestamp: contextPayload.page.timestamp
                             })
                         }
                     ]
@@ -306,7 +414,8 @@ class MCPServer {
                     currentUrl: args.currentUrl || args.url,
                     openaiKey: args.openaiKey,
                     tooltipHistory: args.tooltipHistory,
-                    tooltipContexts: args.tooltipContexts
+                    tooltipContexts: args.tooltipContexts,
+                    chatHistory: args.chatHistory || []
                 });
                 return {
                     content: [
@@ -345,6 +454,36 @@ class MCPServer {
                     ]
                 };
 
+            case 'summarize_page':
+                // Phase 3: Page summarization
+                if (!this.summarizeHandler) {
+                    throw new Error('Summarize handler not available');
+                }
+                const summarizeResult = await this.summarizeHandler(args, args.openaiKey);
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(summarizeResult)
+                        }
+                    ]
+                };
+
+            case 'check_link_safety':
+                // Phase 3: Link safety check
+                if (!this.safetyHandler) {
+                    throw new Error('Safety handler not available');
+                }
+                const safetyResult = await this.safetyHandler(args, args.openaiKey);
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(safetyResult)
+                        }
+                    ]
+                };
+
             default:
                 throw new Error(`Unknown tool: ${name}`);
         }
@@ -360,9 +499,61 @@ class MCPServer {
     }
 
     /**
-     * Handle resources/read request
-     * Phase 1: Enhanced to return full context (screenshot + analysis) for tooltip://context/{url} URIs
+     * Handle summary resource read (Phase 3)
      */
+    async handleSummaryResourceRead(params) {
+        const { uri, options } = params || {};
+        
+        if (uri && uri.startsWith('tooltip://summary/')) {
+            try {
+                const encodedUrl = uri.replace('tooltip://summary/', '');
+                const url = decodeURIComponent(encodedUrl);
+                
+                console.log(`🔌 MCP Summary Resource Read: Fetching summary for ${url}`);
+                
+                if (!this.summarizeHandler) {
+                    throw new Error('Summarize handler not available');
+                }
+                
+                const summaryResult = await this.summarizeHandler({ url, maxLength: 300 }, null);
+                
+                return {
+                    uri,
+                    mimeType: 'application/json',
+                    text: JSON.stringify({
+                        type: 'page_summary',
+                        url: url,
+                        summary: summaryResult.summary,
+                        confidence: summaryResult.confidence,
+                        method: summaryResult.method,
+                        timestamp: new Date().toISOString()
+                    })
+                };
+            } catch (error) {
+                console.error(`❌ MCP Summary Resource Read error for ${uri}:`, error.message);
+                return {
+                    uri,
+                    mimeType: 'application/json',
+                    text: JSON.stringify({
+                        type: 'page_summary',
+                        error: error.message,
+                        timestamp: new Date().toISOString()
+                    })
+                };
+            }
+        }
+        
+        return {
+            uri,
+            mimeType: 'application/json',
+            text: JSON.stringify({
+                type: 'page_summary',
+                error: 'Invalid summary URI format',
+                timestamp: new Date().toISOString()
+            })
+        };
+    }
+
     async handleResourceRead(params) {
         const { uri, options } = params || {};
         
@@ -414,20 +605,56 @@ class MCPServer {
                     }
                 }
                 
-                // Structure response as MCP Resource with full context
+                // Structure response as MCP Resource with standardized ContextPayload
+                // Phase 1: Standardized Context Payload Structure
+                const contextPayload = {
+                    page: {
+                        url: url,
+                        title: captureResult?.title || '',
+                        viewport: captureResult?.viewport || { width: 800, height: 600 },
+                        timestamp: new Date().toISOString()
+                    },
+                    content: {
+                        ocr: {
+                            text: captureResult?.text || captureResult?.ocrData?.text || '',
+                            cleaned: captureResult?.ocrData?.cleaned || captureResult?.text || '',
+                            confidence: captureResult?.ocrData?.confidence || 0.7,
+                            artifacts: captureResult?.ocrData?.artifacts || []
+                        },
+                        metadata: {
+                            title: captureResult?.title || '',
+                            description: captureResult?.description || '',
+                            headings: captureResult?.headings || []
+                        },
+                        semantic: captureResult?.semantic || undefined
+                    },
+                    analysis: captureResult?.analysis || analysis,
+                    interactive: captureResult?.interactive || undefined,
+                    mcpResource: {
+                        uri: uri,
+                        mimeType: 'application/json',
+                        timestamp: new Date().toISOString()
+                    }
+                };
+
+                // Include screenshot data separately (for backward compatibility)
                 return {
                     uri,
                     mimeType: 'application/json',
                     text: JSON.stringify({
-                        type: 'tooltip_context',
-                        url: url,
+                        // Screenshot data (backward compatibility)
                         screenshotUrl: finalScreenshot,
                         screenshot: finalScreenshot,
                         originalScreenshotUrl: captureResult?.originalUrl || screenshotUrl,
                         screenshotDataUri,
-                        analysis: captureResult?.analysis || analysis,
-                        text: captureResult?.text || '',
-                        timestamp: new Date().toISOString()
+                        // Standardized context payload
+                        context: contextPayload,
+                        // Legacy fields (for backward compatibility)
+                        type: 'tooltip_context',
+                        url: url,
+                        analysis: contextPayload.analysis,
+                        text: contextPayload.content.ocr.text,
+                        timestamp: contextPayload.page.timestamp
                     })
                 };
             } catch (error) {
@@ -497,10 +724,121 @@ class MCPServer {
                     ]
                 };
 
+            case 'suggest_actions':
+                // Phase 3: Generate action suggestions
+                if (!this.captureHandler) {
+                    throw new Error('Capture handler not available');
+                }
+                
+                try {
+                    // Get page context
+                    const captureResult = await this.captureHandler(args.url, { includeDataUri: false });
+                    const context = args.context || {};
+                    
+                    // Generate suggestions based on page analysis and interactive elements
+                    const suggestions = generateActionSuggestions(captureResult, context);
+                    
+                    return {
+                        description: `Action suggestions for ${args.url}`,
+                        messages: [
+                            {
+                                role: 'user',
+                                content: {
+                                    type: 'text',
+                                    text: `Based on this page, what actions can I take?`
+                                }
+                            },
+                            {
+                                role: 'assistant',
+                                content: {
+                                    type: 'text',
+                                    text: JSON.stringify(suggestions, null, 2)
+                                }
+                            }
+                        ]
+                    };
+                } catch (error) {
+                    throw new Error(`Failed to generate action suggestions: ${error.message}`);
+                }
+
             default:
                 throw new Error(`Unknown prompt: ${name}`);
         }
     }
+}
+
+/**
+ * Generate action suggestions from page context (Phase 3)
+ */
+function generateActionSuggestions(captureResult, context) {
+    const suggestions = [];
+    
+    // From analysis suggested actions
+    if (captureResult?.analysis?.suggestedActions) {
+        captureResult.analysis.suggestedActions.forEach((action, idx) => {
+            suggestions.push({
+                type: 'action',
+                label: typeof action === 'string' ? action : action.label || `Action ${idx + 1}`,
+                description: typeof action === 'object' ? action.description : '',
+                source: 'analysis'
+            });
+        });
+    }
+    
+    // From interactive elements
+    if (captureResult?.interactive) {
+        // Top 3 most important buttons
+        if (captureResult.interactive.buttons) {
+            captureResult.interactive.buttons
+                .slice(0, 3)
+                .forEach(button => {
+                    suggestions.push({
+                        type: 'button',
+                        label: button.text,
+                        description: button.purpose || `Click ${button.text}`,
+                        source: 'interactive'
+                    });
+                });
+        }
+        
+        // Form actions
+        if (captureResult.interactive.forms && captureResult.interactive.forms.length > 0) {
+            captureResult.interactive.forms.forEach(form => {
+                suggestions.push({
+                    type: 'form',
+                    label: `Submit ${form.action || 'form'}`,
+                    description: `Form with ${form.fields.length} field(s)`,
+                    source: 'interactive'
+                });
+            });
+        }
+    }
+    
+    // Generic suggestions based on page type
+    if (captureResult?.analysis?.pageType) {
+        const pageType = captureResult.analysis.pageType.toLowerCase();
+        
+        if (pageType === 'article' || pageType === 'blog') {
+            suggestions.push({
+                type: 'suggestion',
+                label: 'Read the full article',
+                description: 'Continue reading the complete content',
+                source: 'page_type'
+            });
+        }
+        
+        if (pageType === 'product') {
+            suggestions.push({
+                type: 'suggestion',
+                label: 'View product details',
+                description: 'Learn more about this product',
+                source: 'page_type'
+            });
+        }
+    }
+    
+    // Limit to 5 suggestions
+    return suggestions.slice(0, 5);
 }
 
 module.exports = MCPServer;

@@ -151,25 +151,114 @@
         const MAX_TOOLTIP_HISTORY = 20; // Increased for better context
         const tooltipSummariesSent = new Set(); // Track which tooltips have already had summaries sent to chat
         
+        // Phase 1: Standardized Context Payload - Helper functions
+        /**
+         * Build standardized ContextPayload from data
+         * @param {Object} data - Input data
+         * @returns {Object} Standardized context payload
+         */
+        function buildStandardizedContext(data) {
+            const url = data.url || window.location.href;
+            const timestamp = data.timestamp || Date.now();
+            
+            // Build standardized context payload
+            const contextPayload = {
+                page: {
+                    url: url,
+                    title: data.pageTitle || data.title || document.title || '',
+                    viewport: data.viewport || { width: 800, height: 600 },
+                    timestamp: new Date(timestamp).toISOString()
+                },
+                content: {
+                    ocr: {
+                        text: data.ocrText || data.text || '',
+                        confidence: data.ocrConfidence || 0.7,
+                        cleaned: data.cleanedText || data.ocrText || data.text || ''
+                    },
+                    metadata: {
+                        title: data.pageTitle || data.title || document.title || '',
+                        description: data.description || '',
+                        headings: data.headings || []
+                    },
+                    semantic: data.semantic || undefined
+                },
+                analysis: data.analysis || {
+                    pageType: 'unknown',
+                    keyTopics: [],
+                    suggestedActions: [],
+                    confidence: 0
+                },
+                interactive: data.interactive || undefined,
+                tooltipHistory: data.tooltipHistory || undefined
+            };
+            
+            return contextPayload;
+        }
+        
+        /**
+         * Migrate legacy context format to standardized format
+         * @param {Object} legacyContext - Legacy context object
+         * @returns {Object} Standardized context payload
+         */
+        function migrateToStandardizedContext(legacyContext) {
+            if (!legacyContext) return null;
+            
+            // Check if already in standardized format
+            if (legacyContext.page && legacyContext.content && legacyContext.analysis) {
+                return legacyContext;
+            }
+            
+            // Migrate from legacy format
+            return buildStandardizedContext({
+                url: legacyContext.url,
+                pageTitle: legacyContext.pageTitle,
+                ocrText: legacyContext.ocrText || legacyContext.text,
+                analysis: legacyContext.analysis,
+                timestamp: legacyContext.timestamp,
+                screenshotUrl: legacyContext.screenshotUrl,
+                interactive: legacyContext.interactive,
+                semantic: legacyContext.semantic
+            });
+        }
+        
         // Function to log tooltip events for AI context awareness
         function logTooltipEvent(data) {
+            const url = data.url || window.location.href;
+            const timestamp = Date.now();
+            
+            // Build standardized context payload
+            const standardizedContext = buildStandardizedContext({
+                url: url,
+                pageTitle: data.pageTitle || document.title || '',
+                ocrText: data.ocrText || null,
+                analysis: data.analysis || null,
+                timestamp: timestamp,
+                screenshotUrl: data.screenshotUrl || null,
+                interactive: data.interactive || undefined,
+                semantic: data.semantic || undefined
+            });
+            
+            // Legacy event format (for backward compatibility with existing code)
             const event = {
-                timestamp: Date.now(),
-                url: data.url || window.location.href,
+                timestamp: timestamp,
+                url: url,
                 element: data.element || 'unknown',
                 elementText: data.elementText || '',
                 buttonInfo: data.buttonInfo || null,
                 isButton: data.isButton || false,
-                ocrText: data.ocrText || null, // OCR text from screenshot
-                analysis: data.analysis || null, // Full analysis metadata
-                screenshotUrl: data.screenshotUrl || null, // Screenshot URL/data URI
-                pageTitle: data.pageTitle || document.title || ''
+                ocrText: data.ocrText || null,
+                analysis: data.analysis || null,
+                screenshotUrl: data.screenshotUrl || null,
+                pageTitle: data.pageTitle || document.title || '',
+                // Include standardized context
+                context: standardizedContext
             };
             
-            // Store full context in context store
-            if (data.url) {
-                window.tooltipContextStore.set(data.url, {
+            // Store full context in context store (both formats for compatibility)
+            if (url) {
+                window.tooltipContextStore.set(url, {
                     ...event,
+                    context: standardizedContext, // Standardized format
                     lastAccessed: Date.now()
                 });
             }
@@ -380,10 +469,11 @@
             };
             
             // Render using unified template
+            // Note: showMetadata set to false for tooltip mode (no emojis/metadata in tooltip)
             const templateHtml = window.TooltipTemplate?.render(templateData, {
                 mode: 'tooltip',
                 showScreenshot: true,
-                showMetadata: true,
+                showMetadata: false, // Removed metadata from tooltip display per user request
                 compact: false
             }) || `
                 <div style="padding: 20px; text-align: center; color: rgba(255, 255, 255, 0.7);">
@@ -448,19 +538,35 @@
             // Get tooltip dimensions after display to properly position
             requestAnimationFrame(() => {
                 const rect = tooltipDiv.getBoundingClientRect();
+                const padding = 15; // Padding from viewport edges
+                const bottomPadding = 30; // Extra padding from bottom to prevent cutoff
+                
                 let left = x + 10;
                 let top = y + 10;
                 
-                // Adjust if would overflow viewport
-                if (left + rect.width > window.innerWidth) {
+                // Adjust if would overflow viewport horizontally
+                if (left + rect.width > window.innerWidth - padding) {
                     left = x - rect.width - 10;
                 }
-                if (left < 0) left = 10;
+                if (left < padding) {
+                    left = padding;
+                }
                 
-                if (top + rect.height > window.innerHeight) {
+                // Adjust if would overflow viewport vertically
+                // Important: Ensure tooltip doesn't get cut off at bottom
+                if (top + rect.height > window.innerHeight - bottomPadding) {
+                    // Position above cursor instead
                     top = y - rect.height - 10;
                 }
-                if (top < 0) top = 10;
+                // Ensure it doesn't go above viewport
+                if (top < padding) {
+                    top = padding;
+                }
+                // Final check: ensure bottom edge has enough space
+                if (top + rect.height > window.innerHeight - bottomPadding) {
+                    // If still too close to bottom, center vertically
+                    top = Math.max(padding, (window.innerHeight - rect.height - bottomPadding) / 2);
+                }
                 
                 tooltipDiv.style.left = left + 'px';
                 tooltipDiv.style.top = top + 'px';
@@ -474,6 +580,145 @@
             // Mark as visible
             activeTooltip.isVisible = true;
             activeTooltip.displayStartTime = Date.now();
+            
+            // Phase 3: Add summary and safety sections to tooltip (lazy loaded)
+            // These will be added asynchronously when data is available
+        }
+        
+        // Phase 3: Fetch page summary (target: 20 words for chat)
+        async function fetchPageSummary(url) {
+            try {
+                console.log('🔍 Fetching AI summary for:', url);
+                const response = await chrome.runtime.sendMessage({
+                    action: 'mcp-call',
+                    tool: 'summarize_page',
+                    arguments: { url, maxLength: 500, targetWords: 20 } // Target ~20 words but allow natural completion up to ~100 words
+                });
+                
+                if (response && response.summary) {
+                    const wordCount = response.summary.split(/\s+/).length;
+                    console.log(`✅ AI summary received (${wordCount} words):`, response.summary.substring(0, 100));
+                    return response;
+                } else if (response && response.error) {
+                    console.warn('❌ AI summary error:', response.error);
+                } else {
+                    console.warn('❌ AI summary returned empty response');
+                }
+            } catch (error) {
+                console.error('❌ Failed to fetch AI summary:', error);
+            }
+            return null;
+        }
+        
+        // Phase 3: Fetch link safety check
+        async function fetchLinkSafety(url, currentUrl) {
+            try {
+                const response = await chrome.runtime.sendMessage({
+                    action: 'mcp-call',
+                    tool: 'check_link_safety',
+                    arguments: { 
+                        url,
+                        context: { currentUrl, text: document.body?.textContent?.substring(0, 500) || '' }
+                    }
+                });
+                
+                if (response && response.status) {
+                    return response;
+                }
+            } catch (error) {
+                console.warn('Failed to fetch safety check:', error);
+            }
+            return null;
+        }
+        
+        // Phase 3: Update tooltip with summary
+        function updateTooltipWithSummary(summaryData) {
+            if (!tooltipDiv || !activeTooltip.isVisible) return;
+            
+            const summaryContainer = tooltipDiv.querySelector('.tooltip-summary-container');
+            if (!summaryContainer) {
+                // Create summary container if it doesn't exist
+                const container = document.createElement('div');
+                container.className = 'tooltip-summary-container';
+                container.style.cssText = `
+                    padding: 12px;
+                    margin-top: 8px;
+                    border-top: 1px solid rgba(255, 255, 255, 0.1);
+                    background: rgba(0, 0, 0, 0.2);
+                    border-radius: 0 0 8px 8px;
+                    font-size: 12px;
+                    line-height: 1.5;
+                    color: rgba(255, 255, 255, 0.9);
+                `;
+                
+                const summaryText = document.createElement('div');
+                summaryText.style.cssText = 'margin-top: 4px;';
+                summaryText.textContent = summaryData.summary || 'Summary unavailable';
+                
+                container.innerHTML = `
+                    <div style="font-weight: 600; margin-bottom: 6px; color: rgba(255, 255, 255, 0.95);">
+                        📝 Page Summary
+                    </div>
+                `;
+                container.appendChild(summaryText);
+                
+                // Insert after screenshot or at end of tooltip
+                const templateContainer = tooltipDiv.querySelector('.tooltip-template-popup');
+                if (templateContainer) {
+                    templateContainer.appendChild(container);
+                } else {
+                    tooltipDiv.appendChild(container);
+                }
+            }
+        }
+        
+        // Phase 3: Update tooltip with safety check
+        function updateTooltipWithSafetyCheck(safetyData) {
+            if (!tooltipDiv || !activeTooltip.isVisible) return;
+            
+            const safetyContainer = tooltipDiv.querySelector('.tooltip-safety-container');
+            if (!safetyContainer) {
+                // Create safety indicator if it doesn't exist
+                const container = document.createElement('div');
+                container.className = 'tooltip-safety-container';
+                container.style.cssText = `
+                    padding: 8px 12px;
+                    margin-top: 8px;
+                    border-top: 1px solid rgba(255, 255, 255, 0.1);
+                    font-size: 11px;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                `;
+                
+                const status = safetyData.status || 'safe';
+                const icon = status === 'safe' ? '✅' : (status === 'caution' ? '⚠️' : '❌');
+                const color = status === 'safe' ? 'rgba(76, 175, 80, 0.9)' : 
+                             (status === 'caution' ? 'rgba(255, 193, 7, 0.9)' : 'rgba(244, 67, 54, 0.9)');
+                
+                let reasonsText = '';
+                if (safetyData.reasons && safetyData.reasons.length > 0) {
+                    reasonsText = safetyData.reasons.slice(0, 2).join('. ');
+                }
+                
+                container.innerHTML = `
+                    <span style="font-size: 14px;">${icon}</span>
+                    <div style="flex: 1;">
+                        <div style="font-weight: 600; color: ${color};">
+                            ${status === 'safe' ? 'Safe Link' : (status === 'caution' ? 'Use Caution' : 'Unsafe Link')}
+                        </div>
+                        ${reasonsText ? `<div style="font-size: 10px; color: rgba(255, 255, 255, 0.7); margin-top: 2px;">${reasonsText}</div>` : ''}
+                    </div>
+                `;
+                
+                // Insert at top of tooltip (before screenshot)
+                const templateContainer = tooltipDiv.querySelector('.tooltip-template-popup');
+                if (templateContainer) {
+                    templateContainer.insertBefore(container, templateContainer.firstChild);
+                } else {
+                    tooltipDiv.insertBefore(container, tooltipDiv.firstChild);
+                }
+            }
         }
         
         // Helper function to get icon for page type
@@ -497,10 +742,8 @@
         function renderTooltipContextInChat(contextData, addMessageCallback) {
             if (!window.TooltipTemplate) {
                 console.warn('TooltipTemplate not available');
-                if (addMessageCallback && contextData.text) {
-                    // Fallback to text-only
-                    addMessageCallback(`📝 Preview: ${contextData.text.substring(0, 200)}...`, 'bot');
-                }
+                // Removed: No longer showing raw OCR preview
+                // AI summary will be shown separately via fetchPageSummary
                 return;
             }
             
@@ -508,6 +751,10 @@
             const chatContainerEl = document.querySelector('.chat-container') || 
                                    document.getElementById('chat-container') ||
                                    (typeof chatContainer !== 'undefined' ? chatContainer : null);
+            
+            // Skip rendering template in chat - we only want AI summary now
+            // The template was showing metadata (Banking, pricing, etc.) which we don't want
+            return;
             
             if (!chatContainerEl || (chatContainerEl.style && chatContainerEl.style.display === 'none')) {
                 return;
@@ -701,39 +948,75 @@
         /**
          * Get tooltip context for a specific URL
          * @param {string} url - URL to get context for
+         * @param {boolean} standardized - Return standardized format (default: true)
          * @returns {Object|null} Tooltip context or null if not found
          */
-        function getTooltipContext(url) {
+        function getTooltipContext(url, standardized = true) {
             if (!window.tooltipContextStore) return null;
-            return window.tooltipContextStore.get(url) || null;
+            const context = window.tooltipContextStore.get(url);
+            if (!context) return null;
+            
+            // Return standardized format if requested and available
+            if (standardized && context.context) {
+                return context.context;
+            }
+            
+            // Return standardized format if context needs migration
+            if (standardized) {
+                return migrateToStandardizedContext(context);
+            }
+            
+            // Return legacy format for backward compatibility
+            return context;
         }
         
         /**
          * Get all available tooltip contexts
+         * @param {boolean} standardized - Return standardized format (default: true)
          * @returns {Array} Array of tooltip contexts
          */
-        function getAllTooltipContexts() {
+        function getAllTooltipContexts(standardized = true) {
             if (!window.tooltipContextStore) return [];
-            return Array.from(window.tooltipContextStore.values());
+            const contexts = Array.from(window.tooltipContextStore.values());
+            
+            if (standardized) {
+                return contexts.map(ctx => {
+                    // Return standardized format if available
+                    if (ctx.context) {
+                        return ctx.context;
+                    }
+                    // Migrate legacy format
+                    return migrateToStandardizedContext(ctx);
+                }).filter(ctx => ctx !== null);
+            }
+            
+            return contexts;
         }
         
         /**
          * Format tooltip context as a string for chat prompts
-         * @param {Object} context - Tooltip context object
+         * @param {Object} context - Tooltip context object (standardized or legacy)
          * @param {boolean} includeOCR - Whether to include full OCR text
          * @returns {string} Formatted context string
          */
         function formatTooltipContextForChat(context, includeOCR = false) {
             if (!context) return '';
             
-            let formatted = `📋 **Tooltip Context for: ${context.url}**\n\n`;
+            // Handle both standardized and legacy formats
+            const standardized = context.page && context.content && context.analysis;
+            const url = standardized ? context.page.url : context.url;
+            const title = standardized ? context.page.title : context.pageTitle;
+            const analysis = standardized ? context.analysis : context.analysis;
+            const ocrText = standardized ? context.content?.ocr?.text : context.ocrText;
+            const timestamp = standardized ? new Date(context.page.timestamp).getTime() : context.timestamp;
             
-            if (context.pageTitle) {
-                formatted += `**Page Title:** ${context.pageTitle}\n`;
+            let formatted = `📋 **Tooltip Context for: ${url}**\n\n`;
+            
+            if (title) {
+                formatted += `**Page Title:** ${title}\n`;
             }
             
-            if (context.analysis) {
-                const analysis = context.analysis;
+            if (analysis) {
                 formatted += `**Page Type:** ${analysis.pageType || 'unknown'}\n`;
                 
                 if (analysis.confidence) {
@@ -749,20 +1032,20 @@
                 }
             }
             
-            if (context.ocrText) {
+            if (ocrText) {
                 if (includeOCR) {
-                    formatted += `\n**OCR Text:**\n${context.ocrText}\n`;
+                    formatted += `\n**OCR Text:**\n${ocrText}\n`;
                 } else {
-                    const preview = context.ocrText.substring(0, 200);
-                    formatted += `\n**OCR Preview:** ${preview}${context.ocrText.length > 200 ? '...' : ''}\n`;
+                    const preview = ocrText.substring(0, 200);
+                    formatted += `\n**OCR Preview:** ${preview}${ocrText.length > 200 ? '...' : ''}\n`;
                 }
             }
             
-            if (context.elementText) {
+            if (!standardized && context.elementText) {
                 formatted += `\n**Element Text:** ${context.elementText}\n`;
             }
             
-            const timeAgo = Math.round((Date.now() - context.timestamp) / 1000);
+            const timeAgo = timestamp ? Math.round((Date.now() - timestamp) / 1000) : 0;
             formatted += `\n*Viewed ${timeAgo}s ago*\n`;
             
             return formatted;
@@ -882,8 +1165,79 @@
         }
         
         /**
+         * Generate simple page description (fallback when AI summary unavailable)
+         * Target: ~20 words for consistency
+         * @param {Object} context - Tooltip context with analysis, OCR text, etc.
+         * @param {string} url - URL of the tooltip
+         * @returns {string|null} Simple description (~20 words) or null if insufficient data
+         */
+        function generateSimplePageDescription(context, url) {
+            if (!context) return null;
+            
+            const analysis = context.analysis;
+            const text = context.text || '';
+            const hasAnalysis = analysis && analysis.pageType && analysis.pageType !== 'unknown';
+            
+            if (!hasAnalysis) return null;
+            
+            const pageType = analysis.pageType.toLowerCase();
+            const keyTopics = analysis.keyTopics || [];
+            const suggestedActions = analysis.suggestedActions || [];
+            
+            // Build a ~20 word description
+            let description = '';
+            
+            // Start with page type and purpose
+            if (pageType === 'banking' || pageType === 'financial') {
+                description = `A ${pageType} page offering financial services`;
+            } else if (pageType === 'ecommerce' || pageType === 'product') {
+                description = `An ${pageType} page showcasing products and services`;
+            } else if (pageType === 'article' || pageType === 'blog') {
+                description = `An ${pageType} page with informational content`;
+            } else {
+                description = `A ${pageType} page`;
+            }
+            
+            // Add key topics (target: ~20 words total)
+            if (keyTopics.length > 0) {
+                const topics = keyTopics.slice(0, 3).join(', ');
+                description += ` about ${topics}`;
+            }
+            
+            // Add suggested action if available
+            if (suggestedActions.length > 0 && description.length < 80) {
+                const action = suggestedActions[0].toLowerCase();
+                if (action.includes('sign up') || action.includes('apply') || action.includes('open')) {
+                    description += ` where users can ${action}`;
+                } else if (action.includes('explore') || action.includes('browse')) {
+                    description += ` for exploring and browsing options`;
+                }
+            }
+            
+            // Add text excerpt if still short and we have OCR text
+            const words = description.split(/\s+/).length;
+            if (words < 15 && text && text.length > 50) {
+                // Extract a meaningful phrase from the text
+                const textWords = text.split(/\s+/).slice(0, 20 - words).join(' ');
+                if (textWords.length > 0) {
+                    description += ` with content about ${textWords}`;
+                }
+            }
+            
+            // Ensure we're close to 20 words
+            const finalWords = description.split(/\s+/).filter(w => w.length > 0);
+            if (finalWords.length > 25) {
+                // Trim to ~20 words
+                description = finalWords.slice(0, 20).join(' ');
+            }
+            
+            return description || `A ${pageType} page with relevant information`;
+        }
+        
+        /**
          * Generate intelligent summary about what a tooltip shows
-         * Uses OCR text and metadata to create a rich, informative description
+         * DEPRECATED: Now uses AI summary via fetchPageSummary instead
+         * Kept for backward compatibility
          * @param {Object} context - Tooltip context with analysis, OCR text, etc.
          * @param {string} url - URL of the tooltip
          * @returns {string|null} Summary text or null if insufficient data
@@ -1136,9 +1490,48 @@
         // Helper function to check if extension context is valid
         function isExtensionContextValid() {
             try {
-                return !!(chrome.runtime && chrome.runtime.id);
+                // Check if runtime is available and has an ID
+                if (!chrome.runtime || !chrome.runtime.id) {
+                    return false;
+                }
+                // Try to send a ping message to verify the extension is still active
+                // This is a lightweight check
+                return true;
             } catch (e) {
                 return false;
+            }
+        }
+        
+        // Track if extension context was invalidated to prevent repeated attempts
+        let extensionContextInvalidated = false;
+        
+        // Check if extension context is valid and handle gracefully
+        // Only mark as invalid if we actually get a runtime error, not just a pre-check
+        function checkExtensionContextBeforeAction() {
+            // Don't block if we haven't confirmed it's invalid
+            // Just check if it's currently valid
+            if (!isExtensionContextValid()) {
+                // Only log once
+                if (!extensionContextInvalidated) {
+                    console.warn('⚠️ Extension context appears invalid - will try cache first');
+                }
+                return false;
+            }
+            // If we previously thought it was invalid but now it's valid, reset the flag
+            if (extensionContextInvalidated && isExtensionContextValid()) {
+                extensionContextInvalidated = false;
+                console.log('✅ Extension context restored');
+            }
+            return true;
+        }
+        
+        // Mark extension context as invalidated (called when we get actual runtime errors)
+        function markExtensionContextInvalidated() {
+            if (!extensionContextInvalidated) {
+                extensionContextInvalidated = true;
+                console.warn('⚠️ Extension context invalidated - extension may have been reloaded');
+                console.warn('💡 Reload this page to restore full functionality');
+                console.warn('💡 Using cached data and summaries only until page is reloaded');
             }
         }
 
@@ -1163,12 +1556,6 @@
             const maxRetries = 2;
             const retryDelay = Math.pow(2, retryCount) * 1000; // Exponential backoff: 1s, 2s, 4s
 
-            // Check extension context before attempting fetch
-            if (!isExtensionContextValid()) {
-                console.log(`ℹ️ Extension was reloaded. Please reload this page to enable tooltips.`);
-                throw new Error('Extension context invalidated. Please reload this page.');
-            }
-
             try {
                 console.log(`📸 Fetching context (screenshot + analysis) for: ${url}${retryCount > 0 ? ` (attempt ${retryCount + 1})` : ''}`);
                 if (preferDataUri) {
@@ -1179,40 +1566,120 @@
                 const mcpResourceUri = `tooltip://context/${encodeURIComponent(url)}`;
 
                 const response = await new Promise((resolve, reject) => {
-                    if (!isExtensionContextValid()) {
-                        reject(new Error('Extension context invalidated. Please reload this page.'));
-                        return;
+                    // Only check cache if we've confirmed extension context is invalidated
+                    // Don't block legitimate requests with pre-checks
+                    if (extensionContextInvalidated) {
+                        const cacheEntry = cache.get(url);
+                        if (cacheEntry && isCacheValid(cacheEntry)) {
+                            console.log('✅ Extension context invalidated, using cached context');
+                            resolve({
+                                success: true,
+                                data: {
+                                    screenshotUrl: cacheEntry.screenshotUrl,
+                                    analysis: cacheEntry.analysis,
+                                    text: cacheEntry.text || '',
+                                    usedDataUri: !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:')),
+                                    fromCache: true
+                                }
+                            });
+                            return;
+                        }
                     }
 
-                    chrome.runtime.sendMessage(
-                        {
-                            action: 'fetch-context',
-                            url: url,
-                            options: {
-                                preferDataUri: preferDataUri
-                            },
-                            mcpResource: {
-                                uri: mcpResourceUri,
-                                name: 'Tooltip Context',
-                                description: 'Browsing context with screenshot and analysis'
-                            }
-                        },
-                        (response) => {
-                            if (chrome.runtime.lastError) {
-                                const errorMsg = chrome.runtime.lastError.message;
-                                if (errorMsg.includes('Extension context invalidated') ||
-                                    errorMsg.includes('message port closed')) {
-                                    reject(new Error('Extension was reloaded. Please reload this page to continue.'));
-                                } else {
-                                    reject(new Error(errorMsg));
+                    // Set up timeout for message channel
+                    const timeoutId = setTimeout(() => {
+                        // Try cache before timing out
+                        const cacheEntry = cache.get(url);
+                        if (cacheEntry && isCacheValid(cacheEntry)) {
+                            console.log('✅ Timeout occurred, using cached context');
+                            resolve({
+                                success: true,
+                                data: {
+                                    screenshotUrl: cacheEntry.screenshotUrl,
+                                    analysis: cacheEntry.analysis,
+                                    text: cacheEntry.text || '',
+                                    usedDataUri: !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:')),
+                                    fromCache: true
                                 }
-                            } else if (!response || !response.success) {
-                                reject(new Error(response?.error || 'Failed to fetch context'));
-                            } else {
-                                resolve(response);
-                            }
+                            });
+                        } else {
+                            reject(new Error('Message channel timeout - backend may be slow or unreachable'));
                         }
-                    );
+                    }, 60000); // 60 second timeout
+
+                    try {
+                        chrome.runtime.sendMessage(
+                            {
+                                action: 'fetch-context',
+                                url: url,
+                                options: {
+                                    preferDataUri: preferDataUri
+                                },
+                                mcpResource: {
+                                    uri: mcpResourceUri,
+                                    name: 'Tooltip Context',
+                                    description: 'Browsing context with screenshot and analysis'
+                                }
+                            },
+                            (response) => {
+                                clearTimeout(timeoutId);
+                                
+                                if (chrome.runtime.lastError) {
+                                    const errorMsg = chrome.runtime.lastError.message;
+                                    if (errorMsg.includes('Extension context invalidated') ||
+                                        errorMsg.includes('message port closed') ||
+                                        errorMsg.includes('message channel closed')) {
+                                        // Mark as invalidated when we get actual runtime error
+                                        markExtensionContextInvalidated();
+                                        
+                                        // Try cache as fallback
+                                        console.warn('⚠️ Message channel error, checking cache for:', url);
+                                        const cacheEntry = cache.get(url);
+                                        if (cacheEntry && isCacheValid(cacheEntry)) {
+                                            console.log('✅ Using cached context due to message channel error');
+                                            resolve({
+                                                success: true,
+                                                data: {
+                                                    screenshotUrl: cacheEntry.screenshotUrl,
+                                                    analysis: cacheEntry.analysis,
+                                                    text: cacheEntry.text || '',
+                                                    usedDataUri: !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:')),
+                                                    fromCache: true
+                                                }
+                                            });
+                                            return;
+                                        }
+                                        reject(new Error('Extension was reloaded. Please reload this page to continue.'));
+                                    } else {
+                                        reject(new Error(errorMsg));
+                                    }
+                                } else if (!response || !response.success) {
+                                    reject(new Error(response?.error || 'Failed to fetch context'));
+                                } else {
+                                    resolve(response);
+                                }
+                            }
+                        );
+                    } catch (error) {
+                        clearTimeout(timeoutId);
+                        // Try cache as last resort
+                        const cacheEntry = cache.get(url);
+                        if (cacheEntry && isCacheValid(cacheEntry)) {
+                            console.log('✅ Exception occurred, using cached context');
+                            resolve({
+                                success: true,
+                                data: {
+                                    screenshotUrl: cacheEntry.screenshotUrl,
+                                    analysis: cacheEntry.analysis,
+                                    text: cacheEntry.text || '',
+                                    usedDataUri: !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:')),
+                                    fromCache: true
+                                }
+                            });
+                        } else {
+                            reject(error);
+                        }
+                    }
                 });
 
                 console.log(`📸 Context response received from background proxy`);
@@ -1237,13 +1704,31 @@
                     keys: Object.keys(data)
                 });
 
-                const analysis = data.analysis || {
-                    pageType: 'unknown',
-                    keyTopics: [],
-                    suggestedActions: [],
-                    confidence: 0
-                };
-                const extractedText = data.text || '';
+                // Phase 1: Handle standardized context payload (new format)
+                // Check if we have standardized context structure
+                const standardizedContext = data.context;
+                
+                // Extract analysis and text from standardized or legacy format
+                let analysis, extractedText;
+                if (standardizedContext) {
+                    // Use standardized context
+                    analysis = standardizedContext.analysis || {
+                        pageType: 'unknown',
+                        keyTopics: [],
+                        suggestedActions: [],
+                        confidence: 0
+                    };
+                    extractedText = standardizedContext.content?.ocr?.text || standardizedContext.content?.ocr?.cleaned || data.text || '';
+                } else {
+                    // Legacy format
+                    analysis = data.analysis || {
+                        pageType: 'unknown',
+                        keyTopics: [],
+                        suggestedActions: [],
+                        confidence: 0
+                    };
+                    extractedText = data.text || '';
+                }
 
                 const normalizeUrlOrDataUri = (value) => {
                     if (!value) return null;
@@ -1814,39 +2299,89 @@
                             pageTitle: document.title || ''
                         });
                         
-                                // Show proactive tooltip context in chat using unified template
-                                if (cacheEntry.analysis && typeof window.renderTooltipContextInChat === 'function' && typeof window.addChatMessage === 'function') {
+                                // ALWAYS generate summary for chat - simplified condition (no template dependency)
+                                if (cacheEntry.analysis && typeof window.addChatMessage === 'function') {
                                     setTimeout(() => {
-                                        // Use unified template to render tooltip context in chat
-                                        window.renderTooltipContextInChat({
-                                            screenshotUrl: cacheEntry.screenshotUrl,
-                                            analysis: cacheEntry.analysis,
-                                            text: cacheEntry.text || '',
-                                            url: url,
-                                            usedDataUri: !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:'))
-                                        }, window.addChatMessage);
+                                        // Capture current URL to ensure we only show summary for this tooltip
+                                        const currentTooltipUrl = url;
                                         
-                                        // Also add intelligent summary about what the tooltip shows (only once per URL)
-                                        if (!tooltipSummariesSent.has(url) && typeof window.generateTooltipSummary === 'function') {
-                                            const summary = window.generateTooltipSummary({
-                                                analysis: cacheEntry.analysis,
-                                                text: cacheEntry.text || ''
-                                            }, url);
-                                            if (summary) {
-                                                tooltipSummariesSent.add(url); // Mark as sent
-                                                setTimeout(() => {
-                                                    if (typeof window.addChatMessage === 'function') {
-                                                        window.addChatMessage(`🔍 Tooltip preview: ${summary}`, 'bot');
+                                        // Generate summary for every tooltip (only once per URL)
+                                        if (!tooltipSummariesSent.has(currentTooltipUrl)) {
+                                            tooltipSummariesSent.add(currentTooltipUrl); // Mark as sent to prevent duplicates
+                                            
+                                            console.log(`📝 Generating summary for cached tooltip: ${currentTooltipUrl}`);
+                                            
+                                            // Always try AI summary first, then fallback
+                                            fetchPageSummary(currentTooltipUrl).then(summaryData => {
+                                                // Verify this summary is for the currently active tooltip
+                                                if (activeTooltip.currentUrl !== currentTooltipUrl) {
+                                                    console.log(`⏭️ Summary received for ${currentTooltipUrl} but tooltip moved to ${activeTooltip.currentUrl} - skipping`);
+                                                    return;
+                                                }
+                                                
+                                                if (summaryData && summaryData.summary) {
+                                                    // Remove any trailing ellipsis and ensure clean summary
+                                                    const cleanSummary = summaryData.summary.trim().replace(/\.\.\.+$/, '');
+                                                    const wordCount = cleanSummary.split(/\s+/).length;
+                                                    console.log(`✅ Adding AI summary to chat for ${currentTooltipUrl} (${wordCount} words):`, cleanSummary);
+                                                    window.addChatMessage(`🔍 ${cleanSummary}`, 'bot');
+                                                } else {
+                                                    // Fallback to enhanced description (~20 words) if AI summary unavailable
+                                                    console.warn('⚠️ AI summary unavailable, using enhanced fallback');
+                                                    
+                                                    // Verify this summary is for the currently active tooltip
+                                                    if (activeTooltip.currentUrl !== currentTooltipUrl) {
+                                                        console.log(`⏭️ Fallback summary for ${currentTooltipUrl} but tooltip moved to ${activeTooltip.currentUrl} - skipping`);
+                                                        return;
                                                     }
-                                                }, 800);
-                                            }
+                                                    
+                                                    const fallbackSummary = generateSimplePageDescription({
+                                                        analysis: cacheEntry.analysis,
+                                                        text: cacheEntry.text || ''
+                                                    }, currentTooltipUrl);
+                                                    if (fallbackSummary) {
+                                                        const wordCount = fallbackSummary.split(/\s+/).length;
+                                                        console.log(`✅ Adding fallback summary to chat for ${currentTooltipUrl} (${wordCount} words):`, fallbackSummary);
+                                                        window.addChatMessage(`🔍 ${fallbackSummary}`, 'bot');
+                                                    } else {
+                                                        console.error('❌ Failed to generate any summary (fallback returned null)');
+                                                    }
+                                                }
+                                            }).catch(err => {
+                                                console.error('❌ AI summary fetch failed, using fallback:', err);
+                                                
+                                                // Verify this summary is for the currently active tooltip
+                                                if (activeTooltip.currentUrl !== currentTooltipUrl) {
+                                                    console.log(`⏭️ Fallback summary for ${currentTooltipUrl} but tooltip moved to ${activeTooltip.currentUrl} - skipping`);
+                                                    return;
+                                                }
+                                                
+                                                // Fallback to enhanced description (~20 words)
+                                                const fallbackSummary = generateSimplePageDescription({
+                                                    analysis: cacheEntry.analysis,
+                                                    text: cacheEntry.text || ''
+                                                }, currentTooltipUrl);
+                                                if (fallbackSummary) {
+                                                    const wordCount = fallbackSummary.split(/\s+/).length;
+                                                    console.log(`✅ Adding fallback summary to chat for ${currentTooltipUrl} (${wordCount} words):`, fallbackSummary);
+                                                    window.addChatMessage(`🔍 ${fallbackSummary}`, 'bot');
+                                                } else {
+                                                    console.error('❌ Failed to generate any summary (fallback returned null)');
+                                                    // Last resort: generate from URL alone
+                                                    const urlBasedSummary = `A web page at ${new URL(currentTooltipUrl).hostname} - preview unavailable`;
+                                                    console.log(`✅ Adding URL-based summary to chat for ${currentTooltipUrl}:`, urlBasedSummary);
+                                                    window.addChatMessage(`🔍 ${urlBasedSummary}`, 'bot');
+                                                }
+                                            });
+                                        } else {
+                                            console.log(`⏭️ Summary already sent for URL: ${currentTooltipUrl}`);
                                         }
                                     }, 500);
-                                } else if (cacheEntry.text && typeof window.addProactiveOCRSummary === 'function') {
-                                    // Fallback to old method if template not available
-                                    setTimeout(() => {
-                                        window.addProactiveOCRSummary(cacheEntry.text, url);
-                                    }, 500);
+                                } else {
+                                    console.warn('⚠️ Cannot generate summary for cached tooltip - missing requirements:', {
+                                        hasAnalysis: !!cacheEntry.analysis,
+                                        hasAddChatMessage: typeof window.addChatMessage === 'function'
+                                    });
                                 }
                     }
                 }, HOVER_DELAY);
@@ -1870,12 +2405,35 @@
                     
                     // Fetch context (screenshot + analysis)
                     getContext(url)
-                        .then(context => {
+                        .then(async context => {
                             clearTimeout(loadingTimeout);
                             // Check if still valid before showing
                             if (activeTooltip.element === element && activeTooltip.currentUrl === url) {
                                 activeTooltip.usingDataUri = !!context.usedDataUri;
                                 activeTooltip.cspFallbackAttempted = !!context.usedDataUri;
+                                
+                                // Phase 3: Fetch summary and safety check for long articles (async, lazy load)
+                                const estimatedWordCount = (context.text || '').split(/\s+/).length;
+                                const isLongArticle = estimatedWordCount > 2000 || 
+                                                     context.analysis?.pageType === 'article' ||
+                                                     context.semantic?.articles?.length > 0;
+                                
+                                // Fetch summary for long articles (async, lazy load)
+                                if (isLongArticle) {
+                                    fetchPageSummary(url).then(summary => {
+                                        if (summary && activeTooltip.currentUrl === url && tooltipDiv) {
+                                            updateTooltipWithSummary(summary);
+                                        }
+                                    }).catch(err => console.warn('Summary fetch failed:', err));
+                                }
+                                
+                                // Fetch safety check (async, lazy load)
+                                fetchLinkSafety(url, window.location.href).then(safety => {
+                                    if (safety && activeTooltip.currentUrl === url && tooltipDiv) {
+                                        updateTooltipWithSafetyCheck(safety);
+                                    }
+                                }).catch(err => console.warn('Safety check failed:', err));
+                                
                                 // Show cognitive summary with screenshot (screenshot now displays immediately)
                                 showTooltip(event.clientX, event.clientY, context.screenshotUrl, context.analysis, context.text);
                                 
@@ -1890,59 +2448,235 @@
                                     pageTitle: document.title || ''
                                 });
                                 
-                                // Show proactive tooltip context in chat using unified template
-                                if (context.analysis && typeof window.renderTooltipContextInChat === 'function' && typeof window.addChatMessage === 'function') {
+                                // ALWAYS generate summary for chat - simplified condition
+                                // Generate summary even if context fetch had issues or analysis is missing
+                                // Summary generation is independent of context fetch success
+                                if (typeof window.addChatMessage === 'function') {
                                     setTimeout(() => {
-                                        // Use unified template to render tooltip context in chat
-                                        window.renderTooltipContextInChat({
-                                            screenshotUrl: context.screenshotUrl,
-                                            analysis: context.analysis,
-                                            text: context.text || '',
-                                            url: url,
-                                            usedDataUri: context.usedDataUri || false
-                                        }, window.addChatMessage);
+                                        // Capture current URL to ensure we only show summary for this tooltip
+                                        const currentTooltipUrl = url;
                                         
-                                        // Also add intelligent summary about what the tooltip shows (only once per URL)
-                                        if (!tooltipSummariesSent.has(url) && typeof window.generateTooltipSummary === 'function') {
-                                            const summary = window.generateTooltipSummary(context, url);
-                                            if (summary) {
-                                                tooltipSummariesSent.add(url); // Mark as sent
-                                                setTimeout(() => {
-                                                    if (typeof window.addChatMessage === 'function') {
-                                                        window.addChatMessage(`🔍 Tooltip preview: ${summary}`, 'bot');
+                                        // Generate summary for every tooltip (only once per URL)
+                                        if (!tooltipSummariesSent.has(currentTooltipUrl)) {
+                                            tooltipSummariesSent.add(currentTooltipUrl); // Mark as sent to prevent duplicates
+                                            
+                                            console.log(`📝 Generating summary for tooltip: ${currentTooltipUrl}`);
+                                            
+                                            // Always try AI summary first, then fallback - don't depend on context being perfect
+                                            fetchPageSummary(currentTooltipUrl).then(summaryData => {
+                                                // Verify this summary is for the currently active tooltip
+                                                if (activeTooltip.currentUrl !== currentTooltipUrl) {
+                                                    console.log(`⏭️ Summary received for ${currentTooltipUrl} but tooltip moved to ${activeTooltip.currentUrl} - skipping`);
+                                                    return;
+                                                }
+                                                
+                                                if (summaryData && summaryData.summary) {
+                                                    // Remove any trailing ellipsis and ensure clean summary
+                                                    const cleanSummary = summaryData.summary.trim().replace(/\.\.\.+$/, '');
+                                                    const wordCount = cleanSummary.split(/\s+/).length;
+                                                    console.log(`✅ Adding AI summary to chat for ${currentTooltipUrl} (${wordCount} words):`, cleanSummary);
+                                                    window.addChatMessage(`🔍 ${cleanSummary}`, 'bot');
+                                                } else {
+                                                    // Fallback to enhanced description (~20 words) if AI summary unavailable
+                                                    console.warn('⚠️ AI summary unavailable, using enhanced fallback');
+                                                    
+                                                    // Verify this summary is for the currently active tooltip
+                                                    if (activeTooltip.currentUrl !== currentTooltipUrl) {
+                                                        console.log(`⏭️ Fallback summary for ${currentTooltipUrl} but tooltip moved to ${activeTooltip.currentUrl} - skipping`);
+                                                        return;
                                                     }
-                                                }, 800);
-                                            }
+                                                    
+                                                    // Use context if available, otherwise try to get from cache
+                                                    let contextForFallback = context;
+                                                    if (!contextForFallback || !contextForFallback.analysis) {
+                                                        const cacheEntry = cache.get(currentTooltipUrl);
+                                                        if (cacheEntry && cacheEntry.analysis) {
+                                                            contextForFallback = {
+                                                                analysis: cacheEntry.analysis,
+                                                                text: cacheEntry.text || ''
+                                                            };
+                                                            console.log('✅ Using cached analysis for fallback summary');
+                                                        }
+                                                    }
+                                                    
+                                                    const fallbackSummary = generateSimplePageDescription(contextForFallback, currentTooltipUrl);
+                                                    if (fallbackSummary) {
+                                                        const wordCount = fallbackSummary.split(/\s+/).length;
+                                                        console.log(`✅ Adding fallback summary to chat (${wordCount} words):`, fallbackSummary);
+                                                        window.addChatMessage(`🔍 ${fallbackSummary}`, 'bot');
+                                                    } else {
+                                                        console.error('❌ Failed to generate any summary (fallback returned null)');
+                                                        // Last resort: generate from URL alone
+                                                        try {
+                                                            const urlBasedSummary = `A web page at ${new URL(currentTooltipUrl).hostname} - preview unavailable`;
+                                                            console.log(`✅ Adding URL-based summary to chat for ${currentTooltipUrl}:`, urlBasedSummary);
+                                                            window.addChatMessage(`🔍 ${urlBasedSummary}`, 'bot');
+                                                        } catch (e) {
+                                                            console.error('❌ Could not generate URL-based summary either');
+                                                        }
+                                                    }
+                                                }
+                                            }).catch(err => {
+                                                console.error('❌ AI summary fetch failed, using fallback:', err);
+                                                
+                                                // Verify this summary is for the currently active tooltip
+                                                if (activeTooltip.currentUrl !== currentTooltipUrl) {
+                                                    console.log(`⏭️ Fallback summary for ${currentTooltipUrl} but tooltip moved to ${activeTooltip.currentUrl} - skipping`);
+                                                    return;
+                                                }
+                                                
+                                                // Fallback to enhanced description (~20 words)
+                                                // Use context if available, otherwise try to get from cache
+                                                let contextForFallback = context;
+                                                if (!contextForFallback || !contextForFallback.analysis) {
+                                                    const cacheEntry = cache.get(currentTooltipUrl);
+                                                    if (cacheEntry && cacheEntry.analysis) {
+                                                        contextForFallback = {
+                                                            analysis: cacheEntry.analysis,
+                                                            text: cacheEntry.text || ''
+                                                        };
+                                                        console.log('✅ Using cached analysis for fallback summary');
+                                                    }
+                                                }
+                                                
+                                                const fallbackSummary = generateSimplePageDescription(contextForFallback, currentTooltipUrl);
+                                                if (fallbackSummary) {
+                                                    const wordCount = fallbackSummary.split(/\s+/).length;
+                                                    console.log(`✅ Adding fallback summary to chat (${wordCount} words):`, fallbackSummary);
+                                                    window.addChatMessage(`🔍 ${fallbackSummary}`, 'bot');
+                                                } else {
+                                                    console.error('❌ Failed to generate any summary (fallback returned null)');
+                                                    // Last resort: generate from URL alone
+                                                    const urlBasedSummary = `A web page at ${new URL(url).hostname} - preview unavailable`;
+                                                    console.log(`✅ Adding URL-based summary to chat:`, urlBasedSummary);
+                                                    window.addChatMessage(`🔍 ${urlBasedSummary}`, 'bot');
+                                                }
+                                            });
+                                        } else {
+                                            console.log(`⏭️ Summary already sent for URL: ${url}`);
                                         }
                                     }, 500); // Small delay to let tooltip render first
-                                } else if (context.text && typeof window.addProactiveOCRSummary === 'function') {
-                                    // Fallback to old method if template not available
-                                    setTimeout(() => {
-                                        if (context.text && context.text.trim().length > 0) {
-                                            window.addProactiveOCRSummary(context.text, url);
-                                        }
-                                    }, 500);
+                                } else {
+                                    console.warn('⚠️ Cannot generate summary - addChatMessage not available');
                                 }
                             }
                         })
                         .catch(error => {
                             clearTimeout(loadingTimeout);
-                            console.warn('Failed to load context:', error);
-                            if (activeTooltip.element === element && activeTooltip.currentUrl === url && tooltipDiv) {
-                                // Show error message
-                                let errorMessage = '⚠️ Failed to load preview';
+                            
+                            // Check if error is due to extension context being invalidated
+                            const isContextInvalidated = error.message.includes('Extension context invalidated') ||
+                                                         error.message.includes('Extension was reloaded');
+                            
+                            // Try cache before showing error
+                            const cacheEntry = cache.get(url);
+                            if (cacheEntry && isCacheValid(cacheEntry) && activeTooltip.element === element && activeTooltip.currentUrl === url) {
+                                console.log('✅ Using cached context after error');
+                                activeTooltip.usingDataUri = !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:'));
+                                activeTooltip.cspFallbackAttempted = activeTooltip.usingDataUri;
+                                showTooltip(event.clientX, event.clientY, cacheEntry.screenshotUrl, cacheEntry.analysis, cacheEntry.text);
                                 
-                                if (error.message.includes('timeout') || error.message.includes('Timeout')) {
-                                    errorMessage = '⏱️ Site loading timeout - try again later';
-                                } else if (error.message.includes('500')) {
-                                    errorMessage = '🔧 Server error - backend may be restarting';
-                                } else if (error.message.includes('Failed to fetch')) {
-                                    errorMessage = '🌐 Network error - check connection';
+                                // Still generate summary even with cached context
+                                if (typeof window.addChatMessage === 'function') {
+                                    setTimeout(() => {
+                                        if (!tooltipSummariesSent.has(url)) {
+                                            tooltipSummariesSent.add(url);
+                                            console.log(`📝 Generating summary for cached fallback tooltip: ${url}`);
+                                            
+                                            // Try AI summary, fallback to enhanced description
+                                            fetchPageSummary(url).then(summaryData => {
+                                                if (summaryData && summaryData.summary) {
+                                                    const cleanSummary = summaryData.summary.trim().replace(/\.\.\.+$/, '');
+                                                    const wordCount = cleanSummary.split(/\s+/).length;
+                                                    console.log(`✅ Adding AI summary to chat (${wordCount} words):`, cleanSummary);
+                                                    window.addChatMessage(`🔍 ${cleanSummary}`, 'bot');
+                                                } else {
+                                                    const fallbackSummary = generateSimplePageDescription({
+                                                        analysis: cacheEntry.analysis,
+                                                        text: cacheEntry.text || ''
+                                                    }, url);
+                                                    if (fallbackSummary) {
+                                                        const wordCount = fallbackSummary.split(/\s+/).length;
+                                                        console.log(`✅ Adding fallback summary to chat (${wordCount} words):`, fallbackSummary);
+                                                        window.addChatMessage(`🔍 ${fallbackSummary}`, 'bot');
+                                                    }
+                                                }
+                                            }).catch(err => {
+                                                console.error('❌ AI summary fetch failed:', err);
+                                                const fallbackSummary = generateSimplePageDescription({
+                                                    analysis: cacheEntry.analysis,
+                                                    text: cacheEntry.text || ''
+                                                }, url);
+                                                if (fallbackSummary) {
+                                                    const wordCount = fallbackSummary.split(/\s+/).length;
+                                                    console.log(`✅ Adding fallback summary to chat (${wordCount} words):`, fallbackSummary);
+                                                    window.addChatMessage(`🔍 ${fallbackSummary}`, 'bot');
+                                                }
+                                            });
+                                        }
+                                    }, 500);
+                                }
+                                return; // Don't show error if we have cache
+                            }
+                            
+                            // Only log errors that aren't context invalidation (to reduce spam)
+                            if (!isContextInvalidated) {
+                                console.warn('Failed to load context:', error);
+                            }
+                            
+                            if (activeTooltip.element === element && activeTooltip.currentUrl === url && tooltipDiv) {
+                                // Show error message only if not context invalidation
+                                if (!isContextInvalidated) {
+                                    let errorMessage = '⚠️ Failed to load preview';
+                                    
+                                    if (error.message.includes('timeout') || error.message.includes('Timeout')) {
+                                        errorMessage = '⏱️ Site loading timeout - try again later';
+                                    } else if (error.message.includes('500')) {
+                                        errorMessage = '🔧 Server error - backend may be restarting';
+                                    } else if (error.message.includes('Failed to fetch') || error.message.includes('message channel')) {
+                                        errorMessage = '🌐 Network error - check connection';
+                                    }
+                                    
+                                    tooltipDiv.innerHTML = `<div style="padding: 15px; text-align: center; color: rgba(244, 67, 54, 0.9); font-size: 12px; font-family: Montserrat, sans-serif;">${errorMessage}</div>`;
+                                    // Auto-hide error after 3 seconds
+                                    setTimeout(() => hideTooltip(), 3000);
+                                } else {
+                                    // Context invalidated - just hide tooltip silently
+                                    hideTooltip();
                                 }
                                 
-                                tooltipDiv.innerHTML = `<div style="padding: 15px; text-align: center; color: rgba(244, 67, 54, 0.9); font-size: 12px; font-family: Montserrat, sans-serif;">${errorMessage}</div>`;
-                                // Auto-hide error after 3 seconds
-                                setTimeout(() => hideTooltip(), 3000);
+                                // Still try to generate summary even if context fetch failed
+                                if (typeof window.addChatMessage === 'function') {
+                                    setTimeout(() => {
+                                        if (!tooltipSummariesSent.has(url)) {
+                                            tooltipSummariesSent.add(url);
+                                            console.log(`📝 Generating summary after context fetch error: ${url}`);
+                                            
+                                            // Try AI summary with just URL (no context)
+                                            fetchPageSummary(url).then(summaryData => {
+                                                if (summaryData && summaryData.summary) {
+                                                    const cleanSummary = summaryData.summary.trim().replace(/\.\.\.+$/, '');
+                                                    const wordCount = cleanSummary.split(/\s+/).length;
+                                                    console.log(`✅ Adding AI summary to chat (${wordCount} words):`, cleanSummary);
+                                                    window.addChatMessage(`🔍 ${cleanSummary}`, 'bot');
+                                                } else {
+                                                    // Last resort: URL-based summary
+                                                    try {
+                                                        const urlBasedSummary = `A web page at ${new URL(url).hostname} - preview unavailable`;
+                                                        window.addChatMessage(`🔍 ${urlBasedSummary}`, 'bot');
+                                                    } catch (e) {}
+                                                }
+                                            }).catch(err => {
+                                                console.error('❌ AI summary fetch failed:', err);
+                                                // Last resort: URL-based summary
+                                                try {
+                                                    const urlBasedSummary = `A web page at ${new URL(url).hostname} - preview unavailable`;
+                                                    window.addChatMessage(`🔍 ${urlBasedSummary}`, 'bot');
+                                                } catch (e) {}
+                                            });
+                                        }
+                                    }, 500);
+                                }
                             }
                         });
                 }
@@ -2643,6 +3377,33 @@
         let isOpen = false;
         let isMinimized = false;
         let isDarkMode = false; // Default to light mode
+        
+        // Chat history storage (for memory/context)
+        const CHAT_HISTORY_KEY = 'tooltip-chat-history';
+        const MAX_CHAT_HISTORY = 50; // Keep last 50 messages for context
+        
+        // Load and save chat history
+        function loadChatHistory() {
+            try {
+                const stored = localStorage.getItem(CHAT_HISTORY_KEY);
+                if (stored) {
+                    return JSON.parse(stored);
+                }
+            } catch (e) {
+                console.warn('Failed to load chat history:', e);
+            }
+            return [];
+        }
+        
+        function saveChatHistory(history) {
+            try {
+                // Keep only last MAX_CHAT_HISTORY messages
+                const trimmed = history.slice(-MAX_CHAT_HISTORY);
+                localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(trimmed));
+            } catch (e) {
+                console.warn('Failed to save chat history:', e);
+            }
+        }
         
         // Load saved theme preference
         try {
@@ -3492,18 +4253,24 @@
                     }
                     
                     // Get full tooltip contexts (not just history)
+                    // Get tooltip contexts in standardized format
                     const tooltipContexts = typeof window.getAllTooltipContexts === 'function' 
-                        ? window.getAllTooltipContexts().slice(-10) // Last 10 contexts
+                        ? window.getAllTooltipContexts(true).slice(-10) // Last 10 contexts (standardized)
                         : [];
                     
-                    // Get recent tooltip history
+                    // Get recent tooltip history (legacy format for backward compatibility)
                     const recentTooltipHistory = typeof window.getTooltipHistory === 'function'
                         ? window.getTooltipHistory(10)
                         : (window.tooltipHistory || []).slice(-10);
                     
+                    // Get chat history for context/memory
+                    const chatHistory = loadChatHistory();
+                    const recentHistory = chatHistory.slice(-10); // Last 10 messages for context
+                    
                     // Send chat message (backend will use default key if user key not provided)
                     console.log('📤 Sending chat message with API key:', userApiKey ? 'User key provided' : 'No user key (backend will use default)');
                     console.log('📊 Including tooltip contexts:', tooltipContexts.length, 'contexts');
+                    console.log('💭 Including chat history:', recentHistory.length, 'messages for context');
                     if (tooltipContexts.length > 0) {
                         console.log('📊 Tooltip context preview:', {
                             count: tooltipContexts.length,
@@ -3521,6 +4288,7 @@
                     pageInfo: pageInfo,
                     tooltipHistory: recentTooltipHistory, // Recent tooltip events for context
                     tooltipContexts: tooltipContexts, // Full tooltip contexts with analysis, OCR, metadata
+                    chatHistory: recentHistory, // Chat history for memory/context
                     openaiKey: userApiKey // Optional - backend has default
                 }, (response) => {
                     console.log('📨 Chat response received:', response);
@@ -3818,6 +4586,15 @@
                 chatMessages.querySelector('.chat-message.bot').textContent.includes('Tooltip Companion v1.3.0')) {
                 chatMessages.innerHTML = '';
             }
+            
+            // Save to chat history for memory/context
+            const history = loadChatHistory();
+            history.push({
+                role: type === 'user' ? 'user' : 'assistant',
+                content: text,
+                timestamp: Date.now()
+            });
+            saveChatHistory(history);
             
             const messageDiv = document.createElement('div');
             messageDiv.className = `chat-message ${type}`;
