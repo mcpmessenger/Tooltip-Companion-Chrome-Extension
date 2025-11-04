@@ -305,7 +305,8 @@ class MCPServer {
                     message: args.message,
                     currentUrl: args.currentUrl || args.url,
                     openaiKey: args.openaiKey,
-                    tooltipHistory: args.tooltipHistory
+                    tooltipHistory: args.tooltipHistory,
+                    tooltipContexts: args.tooltipContexts
                 });
                 return {
                     content: [

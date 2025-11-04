@@ -147,7 +147,9 @@
         
         // Track recent tooltip events for AI chat context
         window.tooltipHistory = [];
-        const MAX_TOOLTIP_HISTORY = 10;
+        window.tooltipContextStore = new Map(); // Full context store by URL
+        const MAX_TOOLTIP_HISTORY = 20; // Increased for better context
+        const tooltipSummariesSent = new Set(); // Track which tooltips have already had summaries sent to chat
         
         // Function to log tooltip events for AI context awareness
         function logTooltipEvent(data) {
@@ -158,8 +160,19 @@
                 elementText: data.elementText || '',
                 buttonInfo: data.buttonInfo || null,
                 isButton: data.isButton || false,
-                ocrText: data.ocrText || null // OCR text from screenshot
+                ocrText: data.ocrText || null, // OCR text from screenshot
+                analysis: data.analysis || null, // Full analysis metadata
+                screenshotUrl: data.screenshotUrl || null, // Screenshot URL/data URI
+                pageTitle: data.pageTitle || document.title || ''
             };
+            
+            // Store full context in context store
+            if (data.url) {
+                window.tooltipContextStore.set(data.url, {
+                    ...event,
+                    lastAccessed: Date.now()
+                });
+            }
             
             // Add to history
             window.tooltipHistory.push(event);
@@ -179,6 +192,25 @@
             // Log OCR text if available
             if (data.ocrText) {
                 console.log('📝 Tooltip OCR text extracted:', data.ocrText.substring(0, 100) + (data.ocrText.length > 100 ? '...' : ''));
+            }
+            
+            // Log analysis if available
+            if (data.analysis && data.analysis.pageType) {
+                const confidence = Math.round((data.analysis.confidence || 0) * 100);
+                console.log(`🔍 Analysis received: ${data.analysis.pageType} (confidence: ${confidence}%)`);
+                
+                if (data.analysis.keyTopics && data.analysis.keyTopics.length > 0) {
+                    console.log(`📌 Key topics: ${data.analysis.keyTopics.slice(0, 3).join(', ')}`);
+                }
+                
+                if (data.analysis.suggestedActions && data.analysis.suggestedActions.length > 0) {
+                    console.log(`💡 Suggested: ${data.analysis.suggestedActions[0]}`);
+                }
+            }
+            
+            // Log tooltip context summary for chat awareness
+            if (data.ocrText && data.analysis) {
+                console.log(`📋 Tooltip context ready for chat: ${data.analysis.pageType || 'unknown'} page with ${data.ocrText.length} chars of OCR text`);
             }
         }
         
@@ -311,144 +343,103 @@
         }
         
         // Show tooltip with cognitive summary first, then screenshot
-        function showTooltip(x, y, screenshotUrl, analysis) {
+        function showTooltip(x, y, screenshotUrl, analysis, ocrText = null) {
             if (!tooltipDiv) {
                 tooltipDiv = createTooltipElement();
             }
             
-            // Show cognitive summary if available, otherwise show screenshot or loading
-            if (analysis && analysis.pageType !== 'unknown') {
-                // Hybrid Tooltip: Show cognitive summary first, screenshot loads in background
-                const pageTypeIcon = getPageTypeIcon(analysis.pageType);
-                const keyTopics = analysis.keyTopics && analysis.keyTopics.length > 0 
-                    ? analysis.keyTopics.slice(0, 3).join(' • ') 
-                    : 'General content';
-                const confidence = Math.round(analysis.confidence * 100);
-                
-                let summaryHTML = `
-                    <div style="padding: 14px; font-family: 'Montserrat', sans-serif;">
-                        <div style="font-weight: 600; font-size: 13px; color: rgba(255, 255, 255, 0.95); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-                            ${pageTypeIcon} <span style="text-transform: capitalize;">${analysis.pageType}</span>
-                            ${confidence > 50 ? `<span style="font-size: 10px; color: rgba(255, 255, 255, 0.5); font-weight: normal;">(${confidence}%)</span>` : ''}
-                        </div>
-                        ${analysis.keyTopics && analysis.keyTopics.length > 0 ? `
-                            <div style="font-size: 11px; color: rgba(255, 255, 255, 0.75); margin-bottom: 6px;">
-                                📌 ${keyTopics}
-                            </div>
-                        ` : ''}
-                        ${analysis.suggestedActions && analysis.suggestedActions.length > 0 ? `
-                            <div style="font-size: 10px; color: rgba(255, 255, 255, 0.6); margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.1);">
-                                💡 ${analysis.suggestedActions[0]}
-                            </div>
-                        ` : ''}
-                        ${screenshotUrl ? `
-                            <div id="tooltip-screenshot-container" style="margin-top: 10px;">
-                                <img src="${screenshotUrl}" 
-                                    style="display: block; width: 100%; height: auto; max-height: 200px; object-fit: cover; border-radius: 8px;" 
-                                    alt="Preview"
-                                    loading="lazy"
-                                    crossOrigin="anonymous"
-                                    referrerPolicy="no-referrer">
-                                <div style="display: none; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center; margin-top: 4px;">
-                                    ⚠️ Screenshot unavailable - backend may be experiencing issues
-                                </div>
-                            </div>
-                        ` : `
-                            <div style="margin-top: 8px; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center;">
-                                📸 Loading preview...
-                            </div>
-                        `}
-                    </div>
-                `;
-                tooltipDiv.innerHTML = summaryHTML;
-                
-                // Ensure screenshot loads and displays properly
-                if (screenshotUrl) {
-                    const img = tooltipDiv.querySelector('#tooltip-screenshot-container img');
-                    if (img) {
-                        img.dataset.usingDataUri = activeTooltip.usingDataUri ? 'true' : 'false';
-                        // Check if image is already loaded (cached)
-                        if (img.complete && img.naturalHeight !== 0) {
-                            console.log('✅ Screenshot image already loaded (cached)');
-                        } else {
-                            // Set up load handler for when image loads
-                            img.addEventListener('load', () => {
-                                console.log('✅ Screenshot image loaded successfully');
-                                img.dataset.usingDataUri = img.src.startsWith('data:') ? 'true' : 'false';
-                            });
-                            img.addEventListener('error', async (e) => {
-                                const tooltipUrl = activeTooltip.currentUrl;
-                                console.error('❌ Screenshot image failed to load:', screenshotUrl);
-                                console.error('❌ Image error details:', {
-                                    type: e.type,
-                                    target: e.target?.src,
-                                    isCORS: screenshotUrl && !screenshotUrl.startsWith('blob:') && !screenshotUrl.startsWith('data:'),
-                                    backendUrl: BACKEND_SERVICE_URL
-                                });
-
-                                const alreadyUsingDataUri = img.dataset.usingDataUri === 'true' || activeTooltip.usingDataUri;
-                                const alreadyAttemptedFallback = img.dataset.cspFallbackAttempted === 'true' || activeTooltip.cspFallbackAttempted;
-
-                                if (tooltipUrl && !alreadyUsingDataUri && !alreadyAttemptedFallback) {
-                                    console.log('🛡️ Attempting CSP fallback with data URI');
-                                    img.dataset.cspFallbackAttempted = 'true';
-                                    activeTooltip.cspFallbackAttempted = true;
-                                    try {
-                                        const fallbackContext = await fetchContext(tooltipUrl, { preferDataUri: true });
-                                        if (activeTooltip.currentUrl === tooltipUrl && fallbackContext?.screenshotUrl) {
-                                            console.log('✅ CSP fallback succeeded, updating screenshot');
-                                            activeTooltip.usingDataUri = !!fallbackContext.usedDataUri;
-                                            img.dataset.usingDataUri = fallbackContext.usedDataUri ? 'true' : 'false';
-                                            const existingCache = cache.get(tooltipUrl) || {};
-                                            cache.set(tooltipUrl, {
-                                                ...existingCache,
-                                                screenshotUrl: fallbackContext.screenshotUrl,
-                                                base64Data: fallbackContext.base64Data || existingCache.base64Data || null,
-                                                analysis: fallbackContext.analysis || existingCache.analysis || null,
-                                                text: fallbackContext.text || existingCache.text || '',
-                        originalUrl: fallbackContext.originalScreenshotUrl || existingCache.originalUrl || null,
-                                                timestamp: Date.now()
-                                            });
-                                            if (fallbackContext.base64Data) {
-                                                await saveToIndexedDB(tooltipUrl, fallbackContext.base64Data);
-                                            }
-                                            const errorDiv = img.nextElementSibling;
-                                            if (errorDiv) {
-                                                errorDiv.style.display = 'none';
-                                            }
-                                            img.style.display = 'block';
-                                            img.src = fallbackContext.screenshotUrl;
-                                            return;
-                                        }
-                                    } catch (fallbackError) {
-                                        console.error('❌ CSP fallback failed:', fallbackError);
-                                    }
-                                }
-
-                                img.style.display = 'none';
-                                const errorDiv = img.nextElementSibling;
-                                if (errorDiv) {
-                                    errorDiv.style.display = 'block';
-                                    errorDiv.textContent = '⚠️ Screenshot unavailable - backend may be experiencing issues';
-                                } else {
-                                    const errorMsg = document.createElement('div');
-                                    errorMsg.style.cssText = 'padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 6px; font-size: 10px; color: rgba(255, 255, 255, 0.5); text-align: center; margin-top: 4px;';
-                                    errorMsg.textContent = '⚠️ Screenshot unavailable';
-                                    img.parentElement.appendChild(errorMsg);
-                                }
-                            });
-                        }
-                    }
+            // Inject template styles if not already present
+            if (!document.getElementById('tooltip-template-styles')) {
+                const styleSheet = document.createElement('style');
+                styleSheet.id = 'tooltip-template-styles';
+                styleSheet.textContent = window.TooltipTemplate?.getStyles('tooltip') || '';
+                document.head.appendChild(styleSheet);
+            }
+            
+            // Get OCR text from cache if not provided
+            let extractedText = ocrText || '';
+            if (!extractedText && activeTooltip.currentUrl) {
+                const cacheEntry = cache.get(activeTooltip.currentUrl);
+                if (cacheEntry && cacheEntry.text) {
+                    extractedText = cacheEntry.text;
                 }
-            } else if (screenshotUrl) {
-                // Fallback: Show screenshot directly if no analysis available
-                tooltipDiv.innerHTML = `<img src="${screenshotUrl}" 
-                    style="display: block; width: 100%; height: auto; max-height: ${MAX_TOOLTIP_HEIGHT}px; object-fit: cover;" 
-                    alt="Link preview" 
-                    onerror="this.style.display='none'; this.parentElement.innerHTML='<div style=&quot;padding: 20px; text-align: center; color: rgba(244, 67, 54, 0.9); font-family: Montserrat, sans-serif;&quot;>⚠️ Failed to load preview</div>'">`;
-            } else {
-                // Loading state
-                tooltipDiv.innerHTML = `<div style="padding: 20px; text-align: center; color: rgba(255, 255, 255, 0.7); font-family: Montserrat, sans-serif;">Loading preview...</div>`;
+            }
+            
+            // Use unified template system
+            const templateData = {
+                screenshotUrl: screenshotUrl || null,
+                analysis: analysis || {
+                    pageType: 'unknown',
+                    keyTopics: [],
+                    suggestedActions: [],
+                    confidence: 0
+                },
+                text: extractedText,
+                url: activeTooltip.currentUrl || '',
+                usedDataUri: activeTooltip.usingDataUri || false
+            };
+            
+            // Render using unified template
+            const templateHtml = window.TooltipTemplate?.render(templateData, {
+                mode: 'tooltip',
+                showScreenshot: true,
+                showMetadata: true,
+                compact: false
+            }) || `
+                <div style="padding: 20px; text-align: center; color: rgba(255, 255, 255, 0.7);">
+                    ${screenshotUrl ? 'Loading preview...' : 'Preview unavailable'}
+                </div>
+            `;
+            
+            tooltipDiv.innerHTML = templateHtml;
+            
+            // Attach screenshot handlers using template system
+            if (screenshotUrl && window.TooltipTemplate) {
+                const templateContainer = tooltipDiv.querySelector('.tooltip-template-popup');
+                if (templateContainer) {
+                    window.TooltipTemplate.attachHandlers(templateContainer, screenshotUrl, async (e, img) => {
+                        // CSP fallback handler
+                        const tooltipUrl = activeTooltip.currentUrl;
+                        const alreadyUsingDataUri = img.dataset.usingDataUri === 'true' || activeTooltip.usingDataUri;
+                        const alreadyAttemptedFallback = img.dataset.cspFallbackAttempted === 'true' || activeTooltip.cspFallbackAttempted;
+
+                        if (tooltipUrl && !alreadyUsingDataUri && !alreadyAttemptedFallback) {
+                            console.log('🛡️ Attempting CSP fallback with data URI');
+                            img.dataset.cspFallbackAttempted = 'true';
+                            activeTooltip.cspFallbackAttempted = true;
+                            
+                            try {
+                                const fallbackContext = await fetchContext(tooltipUrl, { preferDataUri: true });
+                                if (activeTooltip.currentUrl === tooltipUrl && fallbackContext?.screenshotUrl) {
+                                    console.log('✅ CSP fallback succeeded, updating screenshot');
+                                    activeTooltip.usingDataUri = !!fallbackContext.usedDataUri;
+                                    
+                                    // Update cache
+                                    const existingCache = cache.get(tooltipUrl) || {};
+                                    cache.set(tooltipUrl, {
+                                        ...existingCache,
+                                        screenshotUrl: fallbackContext.screenshotUrl,
+                                        base64Data: fallbackContext.base64Data || existingCache.base64Data || null,
+                                        analysis: fallbackContext.analysis || existingCache.analysis || null,
+                                        text: fallbackContext.text || existingCache.text || '',
+                                        originalUrl: fallbackContext.originalScreenshotUrl || existingCache.originalUrl || null,
+                                        timestamp: Date.now()
+                                    });
+                                    
+                                    if (fallbackContext.base64Data) {
+                                        await saveToIndexedDB(tooltipUrl, fallbackContext.base64Data);
+                                    }
+                                    
+                                    // Update image source
+                                    img.src = fallbackContext.screenshotUrl;
+                                    img.dataset.usingDataUri = fallbackContext.usedDataUri ? 'true' : 'false';
+                                }
+                            } catch (fallbackError) {
+                                console.error('❌ CSP fallback failed:', fallbackError);
+                            }
+                        }
+                    });
+                }
             }
             
             // Position tooltip
@@ -497,6 +488,511 @@
             };
             return icons[pageType] || icons['unknown'];
         }
+        
+        /**
+         * Render tooltip context in chat window using unified template
+         * @param {Object} contextData - Context data with screenshot, analysis, text, url
+         * @param {Function} addMessageCallback - Function to add message to chat (signature: (text, type))
+         */
+        function renderTooltipContextInChat(contextData, addMessageCallback) {
+            if (!window.TooltipTemplate) {
+                console.warn('TooltipTemplate not available');
+                if (addMessageCallback && contextData.text) {
+                    // Fallback to text-only
+                    addMessageCallback(`📝 Preview: ${contextData.text.substring(0, 200)}...`, 'bot');
+                }
+                return;
+            }
+            
+            // Only proceed if chat is open (check for chatContainer in multiple ways)
+            const chatContainerEl = document.querySelector('.chat-container') || 
+                                   document.getElementById('chat-container') ||
+                                   (typeof chatContainer !== 'undefined' ? chatContainer : null);
+            
+            if (!chatContainerEl || (chatContainerEl.style && chatContainerEl.style.display === 'none')) {
+                return;
+            }
+            
+            // Inject template styles if not already present
+            if (!document.getElementById('tooltip-template-styles')) {
+                const styleSheet = document.createElement('style');
+                styleSheet.id = 'tooltip-template-styles';
+                styleSheet.textContent = window.TooltipTemplate.getStyles('chat');
+                document.head.appendChild(styleSheet);
+            }
+            
+            // Render template for chat mode (without screenshots)
+            // Don't pass screenshotUrl in chat mode to prevent any rendering
+            const templateHtml = window.TooltipTemplate.render({
+                screenshotUrl: null, // Explicitly null in chat mode
+                analysis: contextData.analysis || {
+                    pageType: 'unknown',
+                    keyTopics: [],
+                    suggestedActions: [],
+                    confidence: 0
+                },
+                text: contextData.text || '',
+                url: contextData.url || '',
+                usedDataUri: false
+            }, {
+                mode: 'chat',
+                showScreenshot: false, // No screenshots in chat
+                showMetadata: true,
+                compact: true
+            });
+            
+            // Create message element directly (since addMessage uses textContent, not innerHTML)
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'chat-message bot';
+            messageDiv.style.marginBottom = '10px';
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            // Check for dark mode (safely handle if not defined)
+            const darkMode = typeof isDarkMode !== 'undefined' ? isDarkMode : 
+                           (localStorage.getItem('chat-theme') !== 'light');
+            
+            if (darkMode) {
+                contentDiv.style.background = 'rgba(0, 0, 0, 0.3)';
+                contentDiv.style.color = '#e8e8e8';
+                contentDiv.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+            } else {
+                contentDiv.style.background = 'rgba(102, 126, 234, 0.1)';
+                contentDiv.style.color = '#1a1a1a';
+                contentDiv.style.border = '1px solid rgba(102, 126, 234, 0.2)';
+            }
+            contentDiv.style.borderRadius = '12px 12px 12px 4px';
+            contentDiv.style.padding = '10px 14px';
+            contentDiv.style.maxWidth = '85%';
+            contentDiv.style.fontSize = '13px';
+            contentDiv.style.lineHeight = '1.5';
+            contentDiv.style.boxShadow = '0 1px 2px rgba(0, 0, 0, 0.05)';
+            
+            // Insert template HTML
+            contentDiv.innerHTML = templateHtml;
+            
+            messageDiv.appendChild(contentDiv);
+            
+            // Find chat messages container
+            const chatMessagesEl = document.getElementById('chat-messages') || 
+                                  document.querySelector('.chat-messages') ||
+                                  (typeof chatMessages !== 'undefined' ? chatMessages : null);
+            
+            if (chatMessagesEl) {
+                chatMessagesEl.appendChild(messageDiv);
+                
+                // Scroll to bottom
+                setTimeout(() => {
+                    if (chatMessagesEl) {
+                        chatMessagesEl.scrollTo({
+                            top: chatMessagesEl.scrollHeight,
+                            behavior: 'smooth'
+                        });
+                    }
+                }, 50);
+            } else {
+                console.warn('Chat messages container not found, cannot add tooltip context');
+            }
+            
+            // Screenshot handlers not needed in chat mode (screenshots disabled)
+        }
+        
+        // Expose function globally for chat interface
+        window.renderTooltipContextInChat = renderTooltipContextInChat;
+        
+        /**
+         * Chat Intelligence Functions - Access tooltip context for AI awareness
+         */
+        
+        /**
+         * Get recent tooltip history
+         * @param {number} limit - Maximum number of recent tooltips to return
+         * @returns {Array} Array of tooltip events
+         */
+        function getTooltipHistory(limit = 10) {
+            if (!window.tooltipHistory) return [];
+            return window.tooltipHistory.slice(-limit).reverse(); // Most recent first
+        }
+        
+        /**
+         * Get tooltip context for a specific URL
+         * @param {string} url - URL to get context for
+         * @returns {Object|null} Tooltip context or null if not found
+         */
+        function getTooltipContext(url) {
+            if (!window.tooltipContextStore) return null;
+            return window.tooltipContextStore.get(url) || null;
+        }
+        
+        /**
+         * Get all available tooltip contexts
+         * @returns {Array} Array of tooltip contexts
+         */
+        function getAllTooltipContexts() {
+            if (!window.tooltipContextStore) return [];
+            return Array.from(window.tooltipContextStore.values());
+        }
+        
+        /**
+         * Format tooltip context as a string for chat prompts
+         * @param {Object} context - Tooltip context object
+         * @param {boolean} includeOCR - Whether to include full OCR text
+         * @returns {string} Formatted context string
+         */
+        function formatTooltipContextForChat(context, includeOCR = false) {
+            if (!context) return '';
+            
+            let formatted = `📋 **Tooltip Context for: ${context.url}**\n\n`;
+            
+            if (context.pageTitle) {
+                formatted += `**Page Title:** ${context.pageTitle}\n`;
+            }
+            
+            if (context.analysis) {
+                const analysis = context.analysis;
+                formatted += `**Page Type:** ${analysis.pageType || 'unknown'}\n`;
+                
+                if (analysis.confidence) {
+                    formatted += `**Confidence:** ${Math.round(analysis.confidence * 100)}%\n`;
+                }
+                
+                if (analysis.keyTopics && analysis.keyTopics.length > 0) {
+                    formatted += `**Key Topics:** ${analysis.keyTopics.join(', ')}\n`;
+                }
+                
+                if (analysis.suggestedActions && analysis.suggestedActions.length > 0) {
+                    formatted += `**Suggested Actions:** ${analysis.suggestedActions.join('; ')}\n`;
+                }
+            }
+            
+            if (context.ocrText) {
+                if (includeOCR) {
+                    formatted += `\n**OCR Text:**\n${context.ocrText}\n`;
+                } else {
+                    const preview = context.ocrText.substring(0, 200);
+                    formatted += `\n**OCR Preview:** ${preview}${context.ocrText.length > 200 ? '...' : ''}\n`;
+                }
+            }
+            
+            if (context.elementText) {
+                formatted += `\n**Element Text:** ${context.elementText}\n`;
+            }
+            
+            const timeAgo = Math.round((Date.now() - context.timestamp) / 1000);
+            formatted += `\n*Viewed ${timeAgo}s ago*\n`;
+            
+            return formatted;
+        }
+        
+        /**
+         * Get formatted context summary for recent tooltips
+         * @param {number} limit - Number of recent tooltips to include
+         * @returns {string} Formatted summary string
+         */
+        function getTooltipContextSummary(limit = 5) {
+            const history = getTooltipHistory(limit);
+            if (history.length === 0) {
+                return 'No tooltip context available yet. Hover over links to build context.';
+            }
+            
+            let summary = `📚 **Recent Tooltip Context (${history.length} pages):**\n\n`;
+            
+            history.forEach((context, index) => {
+                summary += `${index + 1}. **${context.url}**\n`;
+                if (context.analysis && context.analysis.pageType) {
+                    summary += `   Type: ${context.analysis.pageType}`;
+                    if (context.analysis.confidence) {
+                        summary += ` (${Math.round(context.analysis.confidence * 100)}% confidence)`;
+                    }
+                    summary += '\n';
+                }
+                if (context.ocrText) {
+                    const preview = context.ocrText.substring(0, 100);
+                    summary += `   Text: ${preview}${context.ocrText.length > 100 ? '...' : ''}\n`;
+                }
+                summary += '\n';
+            });
+            
+            return summary;
+        }
+        
+        /**
+         * Auto-enhance chat message with tooltip context if relevant
+         * @param {string} message - User's chat message
+         * @returns {string} Enhanced message with context
+         */
+        function enhanceChatMessageWithContext(message) {
+            const lowerMessage = message.toLowerCase();
+            
+            // Check if message asks about what they can do or what actions are available
+            const asksAboutActions = lowerMessage.includes('what can i do') ||
+                                   lowerMessage.includes('what can i') ||
+                                   lowerMessage.includes('what actions') ||
+                                   lowerMessage.includes('what options') ||
+                                   lowerMessage.includes('what is available');
+            
+            // Check if message asks about insights
+            const asksAboutInsights = lowerMessage.includes('what kind of insights') ||
+                                    lowerMessage.includes('what insights') ||
+                                    lowerMessage.includes('what information') ||
+                                    lowerMessage.includes('what can you tell me');
+            
+            // Check if message asks about recent tooltips/pages
+            const asksAboutRecent = lowerMessage.includes('recent') || 
+                                  lowerMessage.includes('what did i') ||
+                                  lowerMessage.includes('what pages') ||
+                                  lowerMessage.includes('tooltip');
+            
+            // Check if message asks about a specific URL
+            const urlMatch = message.match(/https?:\/\/[^\s]+/);
+            
+            if (asksAboutRecent) {
+                const summary = getTooltipContextSummary(5);
+                return `${summary}\n\nUser question: ${message}`;
+            } else if (urlMatch) {
+                const url = urlMatch[0];
+                const context = getTooltipContext(url);
+                if (context) {
+                    const formatted = formatTooltipContextForChat(context, true);
+                    return `${formatted}\n\nUser question: ${message}`;
+                }
+            } else if (asksAboutActions || asksAboutInsights) {
+                // For "what can I do" or "what insights" questions, provide detailed context
+                const recentContext = getTooltipHistory(3);
+                if (recentContext.length > 0) {
+                    let contextNote = '\n\n**Context from recent tooltip previews:**\n';
+                    recentContext.forEach((ctx, idx) => {
+                        contextNote += `\nPage ${idx + 1}: ${ctx.url}\n`;
+                        if (ctx.analysis) {
+                            if (ctx.analysis.suggestedActions && ctx.analysis.suggestedActions.length > 0) {
+                                contextNote += `Available actions: ${ctx.analysis.suggestedActions.join('; ')}\n`;
+                            }
+                            if (ctx.analysis.keyTopics && ctx.analysis.keyTopics.length > 0) {
+                                contextNote += `Key topics: ${ctx.analysis.keyTopics.join(', ')}\n`;
+                            }
+                        }
+                        if (ctx.ocrText) {
+                            const preview = ctx.ocrText.substring(0, 200);
+                            contextNote += `Content preview: ${preview}${ctx.ocrText.length > 200 ? '...' : ''}\n`;
+                        }
+                    });
+                    return `${message}\n\n${contextNote}`;
+                }
+            }
+            
+            // If no specific match, append recent context summary as context
+            const recentContext = getTooltipHistory(3);
+            if (recentContext.length > 0) {
+                let contextNote = '\n\n---\n**Recent context from tooltips:**\n';
+                recentContext.forEach((ctx, idx) => {
+                    contextNote += `${idx + 1}. ${ctx.url}`;
+                    if (ctx.analysis && ctx.analysis.pageType) {
+                        contextNote += ` (${ctx.analysis.pageType})`;
+                    }
+                    contextNote += '\n';
+                });
+                return message + contextNote;
+            }
+            
+            return message;
+        }
+        
+        /**
+         * Generate intelligent summary about what a tooltip shows
+         * Uses OCR text and metadata to create a rich, informative description
+         * @param {Object} context - Tooltip context with analysis, OCR text, etc.
+         * @param {string} url - URL of the tooltip
+         * @returns {string|null} Summary text or null if insufficient data
+         */
+        function generateTooltipSummary(context, url) {
+            if (!context) return null;
+            
+            const analysis = context.analysis;
+            const ocrText = context.text || '';
+            const hasAnalysis = analysis && analysis.pageType && analysis.pageType !== 'unknown';
+            const hasOCR = ocrText && ocrText.trim().length > 0;
+            
+            // Need at least some data to generate a summary
+            if (!hasAnalysis && !hasOCR) return null;
+            
+            const cleanText = hasOCR ? ocrText.trim().toLowerCase() : '';
+            const originalText = ocrText.trim();
+            
+            // Extract rates (APR, interest rates, percentages)
+            const ratePatterns = [
+                /(\d+\.?\d*)\s*%\s*(?:apr|apy|interest|rate|cashback|cash\s*back|rewards?)/gi,
+                /(?:apr|apy|interest\s*rate)[:\s]*(\d+\.?\d*)\s*%/gi,
+                /(\d+\.?\d*)\s*%\s*(?:cash|rewards?|back)/gi,
+                /(\$\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:bonus|offer|reward)/gi,
+                /(?:bonus|offer|reward)[:\s]*(\$\d+(?:,\d{3})*(?:\.\d{2})?)/gi
+            ];
+            
+            const rates = [];
+            const bonuses = [];
+            
+            ratePatterns.forEach(pattern => {
+                const matches = originalText.matchAll(pattern);
+                for (const match of matches) {
+                    const value = match[1];
+                    if (match[0].toLowerCase().includes('apr') || match[0].toLowerCase().includes('apy') || match[0].toLowerCase().includes('interest')) {
+                        if (!rates.includes(`${value}%`)) {
+                            rates.push(`${value}%`);
+                        }
+                    } else if (match[0].toLowerCase().includes('bonus') || match[0].toLowerCase().includes('offer') || match[0].toLowerCase().includes('reward')) {
+                        if (value.startsWith('$')) {
+                            if (!bonuses.includes(value)) {
+                                bonuses.push(value);
+                            }
+                        } else if (!rates.includes(`${value}%`)) {
+                            rates.push(`${value}%`);
+                        }
+                    } else if (match[0].toLowerCase().includes('cash') || match[0].toLowerCase().includes('rewards')) {
+                        if (!rates.includes(`${value}%`)) {
+                            rates.push(`${value}%`);
+                        }
+                    }
+                }
+            });
+            
+            // Extract sign-up purpose
+            let signUpPurpose = null;
+            if (cleanText.includes('sign up') || cleanText.includes('signup') || cleanText.includes('register') || cleanText.includes('create account')) {
+                // Look for what they're signing up for
+                const signUpPatterns = [
+                    /(?:sign\s*up|register|create\s*account)\s*(?:for|to)\s*([^.!?]+)/i,
+                    /(?:sign\s*up|register|create)\s+([a-z\s]+?)\s+(?:account|service|membership)/i,
+                    /(?:open|apply\s*for)\s+([a-z\s]+?)\s+(?:account|card|service)/i
+                ];
+                
+                for (const pattern of signUpPatterns) {
+                    const match = originalText.match(pattern);
+                    if (match && match[1]) {
+                        signUpPurpose = match[1].trim();
+                        // Clean up the purpose
+                        signUpPurpose = signUpPurpose.replace(/^(a|an|the)\s+/i, '').trim();
+                        if (signUpPurpose.length > 50) {
+                            signUpPurpose = signUpPurpose.substring(0, 50) + '...';
+                        }
+                        break;
+                    }
+                }
+                
+                // Fallback: look for account types mentioned
+                if (!signUpPurpose) {
+                    if (cleanText.includes('checking account')) {
+                        signUpPurpose = 'a checking account';
+                    } else if (cleanText.includes('credit card')) {
+                        signUpPurpose = 'a credit card';
+                    } else if (cleanText.includes('savings account')) {
+                        signUpPurpose = 'a savings account';
+                    } else if (cleanText.includes('membership')) {
+                        signUpPurpose = 'membership';
+                    }
+                }
+            }
+            
+            // Extract requirements or terms
+            const requirements = [];
+            if (cleanText.includes('qualify') || cleanText.includes('requirement') || cleanText.includes('minimum') || cleanText.includes('direct deposit')) {
+                const reqPatterns = [
+                    /(\$\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:or\s*more)?\s*(?:in\s*)?(?:qualifying\s*)?(?:direct\s*)?deposits?/gi,
+                    /(?:minimum|qualify|requirement)[:\s]*(\$\d+(?:,\d{3})*(?:\.\d{2})?)/gi,
+                    /(\$\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:minimum|required)/gi,
+                    /(?:make|deposit)\s*(\$\d+(?:,\d{3})*(?:\.\d{2})?)/gi
+                ];
+                
+                reqPatterns.forEach(pattern => {
+                    const matches = originalText.matchAll(pattern);
+                    for (const match of matches) {
+                        const value = match[1];
+                        if (value && !requirements.includes(value)) {
+                            // Check if it's a direct deposit requirement
+                            const context = match[0].toLowerCase();
+                            if (context.includes('direct deposit') || context.includes('deposit')) {
+                                const formattedValue = value.startsWith('$') ? value : `$${value}`;
+                                requirements.push(`${formattedValue} in direct deposits`);
+                            } else {
+                                const formattedValue = value.startsWith('$') ? value : `$${value}`;
+                                requirements.push(formattedValue);
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Build the description
+            let description = '';
+            
+            // Start with page type and main purpose
+            if (hasAnalysis) {
+                const pageType = analysis.pageType.toLowerCase();
+                
+                // Determine main action/purpose
+                if (signUpPurpose) {
+                    description = `Allows users to sign up for ${signUpPurpose}`;
+                } else if (cleanText.includes('checking') && bonuses.length > 0) {
+                    description = `Checking account offer with ${bonuses.join(' and ')} bonus`;
+                } else if (cleanText.includes('credit card')) {
+                    description = 'Credit card offers';
+                } else if (cleanText.includes('bonus') || bonuses.length > 0) {
+                    description = `Promotional offer${bonuses.length > 0 ? ` with ${bonuses.join(' and ')} bonus` : ''}`;
+                } else if (pageType === 'banking') {
+                    description = 'Banking services';
+                } else if (cleanText.includes('sign in') || cleanText.includes('login')) {
+                    description = 'Sign-in page';
+                } else if (analysis.keyTopics && analysis.keyTopics.length > 0) {
+                    description = `A ${pageType} page about ${analysis.keyTopics.slice(0, 2).join(' and ')}`;
+                } else {
+                    description = `A ${pageType} page`;
+                }
+            } else {
+                // Fallback if no analysis
+                if (signUpPurpose) {
+                    description = `Allows users to sign up for ${signUpPurpose}`;
+                } else if (bonuses.length > 0) {
+                    description = `Promotional offer with ${bonuses.join(' and ')} bonus`;
+                } else {
+                    description = 'A web page';
+                }
+            }
+            
+            // Add rates if found
+            if (rates.length > 0) {
+                description += ` (${rates.join(', ')} ${rates.length === 1 ? 'rate' : 'rates'})`;
+            }
+            
+            // Add requirements if found
+            if (requirements.length > 0 && (signUpPurpose || cleanText.includes('bonus') || cleanText.includes('offer'))) {
+                description += ` - requires ${requirements.join(' or ')}`;
+            }
+            
+            // Add what it does if we have suggested actions and no specific purpose yet
+            if (hasAnalysis && analysis.suggestedActions && analysis.suggestedActions.length > 0 && !signUpPurpose) {
+                const action = analysis.suggestedActions[0].toLowerCase();
+                if (action.includes('explore') || action.includes('browse')) {
+                    description += ' - allows users to explore options';
+                } else if (action.includes('apply') || action.includes('open')) {
+                    description += ' - allows users to apply';
+                } else if (action.includes('contact')) {
+                    description += ' - provides contact information';
+                }
+            }
+            
+            // Capitalize first letter
+            description = description.charAt(0).toUpperCase() + description.slice(1);
+            
+            return description;
+        }
+        
+        // Expose chat intelligence functions globally
+        window.getTooltipHistory = getTooltipHistory;
+        window.getTooltipContext = getTooltipContext;
+        window.getAllTooltipContexts = getAllTooltipContexts;
+        window.formatTooltipContextForChat = formatTooltipContextForChat;
+        window.getTooltipContextSummary = getTooltipContextSummary;
+        window.enhanceChatMessageWithContext = enhanceChatMessageWithContext;
+        window.generateTooltipSummary = generateTooltipSummary;
         
         // Update tooltip with screenshot when it loads (for hybrid tooltip)
         function updateTooltipWithScreenshot(screenshotUrl) {
@@ -749,21 +1245,9 @@
                     if (preferDataUri) {
                         finalScreenshotUrl = dataUriValue;
                     } else {
-                        try {
-                            const commaIndex = dataUriValue.indexOf(',');
-                            const base64String = dataUriValue.substring(commaIndex + 1);
-                            const binaryString = atob(base64String);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                bytes[i] = binaryString.charCodeAt(i);
-                            }
-                            const blob = new Blob([bytes], { type: 'image/png' });
-                            finalScreenshotUrl = URL.createObjectURL(blob);
-                            console.log('✅ Converted base64 screenshot to blob URL');
-                        } catch (err) {
-                            console.warn('Failed to convert data URI to blob URL:', err);
-                            finalScreenshotUrl = dataUriValue;
-                        }
+                        // Use data URI directly (more reliable than blob URLs)
+                        finalScreenshotUrl = dataUriValue;
+                        console.log('✅ Using data URI for screenshot (CSP-safe)');
                     }
                 } else if (legacyScreenshot) {
                     console.log('⚠️ Legacy screenshot field detected, converting to data URI');
@@ -910,35 +1394,27 @@
                             }
                             
                             try {
-                                // Convert base64 to blob
-                                let base64String = base64Data;
+                                // Use data URI directly (more reliable than blob URLs)
+                                let dataUri = base64Data;
                                 
-                                // Extract base64 data from data URL if present
-                                if (base64Data.startsWith('data:image/')) {
-                                    const commaIndex = base64Data.indexOf(',');
-                                    base64String = base64Data.substring(commaIndex + 1);
+                                // Ensure it's a proper data URI
+                                if (!dataUri.startsWith('data:image/')) {
+                                    // Convert base64 string to data URI
+                                    dataUri = `data:image/png;base64,${base64Data}`;
                                 }
                                 
-                                const binaryString = atob(base64String);
-                                const bytes = new Uint8Array(binaryString.length);
-                                for (let i = 0; i < binaryString.length; i++) {
-                                    bytes[i] = binaryString.charCodeAt(i);
-                                }
-                                const blob = new Blob([bytes], { type: 'image/png' });
-                                const blobUrl = URL.createObjectURL(blob);
+                                console.log(`✅ Loaded IndexedDB data as data URI: ${url}`);
                                 
-                                console.log(`✅ Converted IndexedDB data to blob: ${url}`);
-                                
-                                // Also update memory cache (store both blob URL and base64 data)
+                                // Also update memory cache (store data URI and base64 data)
                                 cache.set(url, {
-                                    screenshotUrl: blobUrl,
+                                    screenshotUrl: dataUri,
                                     base64Data: base64Data, // Store original base64 for OCR
                                     timestamp: request.result.timestamp
                                 });
                                 
-                                resolve(blobUrl);
+                                resolve(dataUri);
                             } catch (e) {
-                                console.warn('Failed to convert base64 to blob:', e);
+                                console.warn('Failed to process IndexedDB data:', e);
                                 resolve(null);
                             }
                         } else {
@@ -1241,37 +1717,54 @@
                 activeTooltip.timeout = setTimeout(() => {
                     if (activeTooltip.element === element && activeTooltip.currentUrl === url && !activeTooltip.isVisible) {
                         // Show tooltip with cognitive summary and cached screenshot
-                        showTooltip(event.clientX, event.clientY, cacheEntry.screenshotUrl, cacheEntry.analysis);
+                        showTooltip(event.clientX, event.clientY, cacheEntry.screenshotUrl, cacheEntry.analysis, cacheEntry.text);
                         activeTooltip.usingDataUri = !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:'));
                         activeTooltip.cspFallbackAttempted = activeTooltip.usingDataUri;
-                        // Log tooltip event for AI awareness
+                        // Log tooltip event for AI awareness with full context
                         logTooltipEvent({
                             url: url,
                             element: element.tagName.toLowerCase(),
                             elementText: element.textContent?.trim() || '',
-                            ocrText: cacheEntry.text || null
+                            ocrText: cacheEntry.text || null,
+                            analysis: cacheEntry.analysis || null,
+                            screenshotUrl: cacheEntry.screenshotUrl || null,
+                            pageTitle: document.title || ''
                         });
                         
-                        // Show proactive information if available and chat is open
-                        if (cacheEntry.analysis && cacheEntry.text && typeof window.addProactiveOCRSummary === 'function') {
-                            setTimeout(() => {
-                                window.addProactiveOCRSummary(cacheEntry.text, url);
-                                
-                                // Also show analysis insights
-                                if (cacheEntry.analysis.pageType !== 'unknown') {
-                                    const insights = [];
-                                    if (cacheEntry.analysis.pageType !== 'unknown') {
-                                        insights.push(`Page type: ${cacheEntry.analysis.pageType}`);
-                                    }
-                                    if (cacheEntry.analysis.keyTopics && cacheEntry.analysis.keyTopics.length > 0) {
-                                        insights.push(`Topics: ${cacheEntry.analysis.keyTopics.slice(0, 3).join(', ')}`);
-                                    }
-                                    if (insights.length > 0 && typeof window.addChatMessage === 'function') {
-                                        window.addChatMessage(`🔍 Tooltip Preview Insights:\n${insights.join('\n')}`, 'bot');
-                                    }
+                                // Show proactive tooltip context in chat using unified template
+                                if (cacheEntry.analysis && typeof window.renderTooltipContextInChat === 'function' && typeof window.addChatMessage === 'function') {
+                                    setTimeout(() => {
+                                        // Use unified template to render tooltip context in chat
+                                        window.renderTooltipContextInChat({
+                                            screenshotUrl: cacheEntry.screenshotUrl,
+                                            analysis: cacheEntry.analysis,
+                                            text: cacheEntry.text || '',
+                                            url: url,
+                                            usedDataUri: !!(cacheEntry.screenshotUrl && cacheEntry.screenshotUrl.startsWith('data:'))
+                                        }, window.addChatMessage);
+                                        
+                                        // Also add intelligent summary about what the tooltip shows (only once per URL)
+                                        if (!tooltipSummariesSent.has(url) && typeof window.generateTooltipSummary === 'function') {
+                                            const summary = window.generateTooltipSummary({
+                                                analysis: cacheEntry.analysis,
+                                                text: cacheEntry.text || ''
+                                            }, url);
+                                            if (summary) {
+                                                tooltipSummariesSent.add(url); // Mark as sent
+                                                setTimeout(() => {
+                                                    if (typeof window.addChatMessage === 'function') {
+                                                        window.addChatMessage(`🔍 Tooltip preview: ${summary}`, 'bot');
+                                                    }
+                                                }, 800);
+                                            }
+                                        }
+                                    }, 500);
+                                } else if (cacheEntry.text && typeof window.addProactiveOCRSummary === 'function') {
+                                    // Fallback to old method if template not available
+                                    setTimeout(() => {
+                                        window.addProactiveOCRSummary(cacheEntry.text, url);
+                                    }, 500);
                                 }
-                            }, 500);
-                        }
                     }
                 }, HOVER_DELAY);
                 return;
@@ -1301,38 +1794,51 @@
                                 activeTooltip.usingDataUri = !!context.usedDataUri;
                                 activeTooltip.cspFallbackAttempted = !!context.usedDataUri;
                                 // Show cognitive summary with screenshot (screenshot now displays immediately)
-                                showTooltip(event.clientX, event.clientY, context.screenshotUrl, context.analysis);
+                                showTooltip(event.clientX, event.clientY, context.screenshotUrl, context.analysis, context.text);
                                 
-                                // Log tooltip event for AI awareness
+                                // Log tooltip event for AI awareness with full context
                                 logTooltipEvent({
                                     url: url,
                                     element: element.tagName.toLowerCase(),
                                     elementText: element.textContent?.trim() || '',
-                                    ocrText: context.text || null
+                                    ocrText: context.text || null,
+                                    analysis: context.analysis || null,
+                                    screenshotUrl: context.screenshotUrl || null,
+                                    pageTitle: document.title || ''
                                 });
                                 
-                                // Show proactive information if chat is available
-                                if (context.analysis && typeof window.addProactiveOCRSummary === 'function') {
-                                    // Show proactive summary with analysis info
+                                // Show proactive tooltip context in chat using unified template
+                                if (context.analysis && typeof window.renderTooltipContextInChat === 'function' && typeof window.addChatMessage === 'function') {
+                                    setTimeout(() => {
+                                        // Use unified template to render tooltip context in chat
+                                        window.renderTooltipContextInChat({
+                                            screenshotUrl: context.screenshotUrl,
+                                            analysis: context.analysis,
+                                            text: context.text || '',
+                                            url: url,
+                                            usedDataUri: context.usedDataUri || false
+                                        }, window.addChatMessage);
+                                        
+                                        // Also add intelligent summary about what the tooltip shows (only once per URL)
+                                        if (!tooltipSummariesSent.has(url) && typeof window.generateTooltipSummary === 'function') {
+                                            const summary = window.generateTooltipSummary(context, url);
+                                            if (summary) {
+                                                tooltipSummariesSent.add(url); // Mark as sent
+                                                setTimeout(() => {
+                                                    if (typeof window.addChatMessage === 'function') {
+                                                        window.addChatMessage(`🔍 Tooltip preview: ${summary}`, 'bot');
+                                                    }
+                                                }, 800);
+                                            }
+                                        }
+                                    }, 500); // Small delay to let tooltip render first
+                                } else if (context.text && typeof window.addProactiveOCRSummary === 'function') {
+                                    // Fallback to old method if template not available
                                     setTimeout(() => {
                                         if (context.text && context.text.trim().length > 0) {
                                             window.addProactiveOCRSummary(context.text, url);
                                         }
-                                        
-                                        // Also show analysis insights proactively
-                                        if (context.analysis && context.analysis.pageType !== 'unknown') {
-                                            const insights = [];
-                                            if (context.analysis.pageType !== 'unknown') {
-                                                insights.push(`Page type: ${context.analysis.pageType}`);
-                                            }
-                                            if (context.analysis.keyTopics && context.analysis.keyTopics.length > 0) {
-                                                insights.push(`Topics: ${context.analysis.keyTopics.slice(0, 3).join(', ')}`);
-                                            }
-                                            if (insights.length > 0 && typeof window.addChatMessage === 'function') {
-                                                window.addChatMessage(`🔍 Tooltip Preview Insights:\n${insights.join('\n')}`, 'bot');
-                                            }
-                                        }
-                                    }, 500); // Small delay to let tooltip render first
+                                    }, 500);
                                 }
                             }
                         })
@@ -2568,6 +3074,55 @@
             addMessage(message, 'user');
             chatInput.value = '';
             
+            // Check for tooltip context commands
+            const lowerMessage = message.toLowerCase().trim();
+            if (lowerMessage === '/context' || lowerMessage === '/tooltips' || lowerMessage === '/recent') {
+                if (typeof window.getTooltipContextSummary === 'function') {
+                    const summary = window.getTooltipContextSummary(10);
+                    addMessage(summary, 'bot');
+                } else {
+                    addMessage('📚 Tooltip context system not available. Hover over links to build context.', 'bot');
+                }
+                return;
+            }
+            
+            if (lowerMessage.startsWith('/context ')) {
+                const url = message.substring('/context '.length).trim();
+                if (url && typeof window.getTooltipContext === 'function') {
+                    const context = window.getTooltipContext(url);
+                    if (context && typeof window.formatTooltipContextForChat === 'function') {
+                        const formatted = window.formatTooltipContextForChat(context, true);
+                        addMessage(formatted, 'bot');
+                    } else {
+                        addMessage(`❌ No tooltip context found for: ${url}\n\n💡 Hover over a link to build context for that page.`, 'bot');
+                    }
+                } else {
+                    addMessage('💡 Usage: `/context <url>` to get tooltip context for a specific URL.', 'bot');
+                }
+                return;
+            }
+            
+            // Check for "what's the tooltip about" type questions
+            if (lowerMessage.includes('tooltip') && (lowerMessage.includes('about') || lowerMessage.includes('what') || lowerMessage.includes('show'))) {
+                const recentContexts = typeof window.getTooltipHistory === 'function' ? window.getTooltipHistory(1) : [];
+                if (recentContexts.length > 0) {
+                    const latest = recentContexts[0];
+                    if (typeof window.generateTooltipSummary === 'function') {
+                        const summary = window.generateTooltipSummary(latest, latest.url);
+                        if (summary) {
+                            addMessage(`🔍 ${summary}`, 'bot');
+                        } else {
+                            addMessage(`📋 The latest tooltip preview shows a page, but I need more context to describe it.`, 'bot');
+                        }
+                    } else {
+                        addMessage(`📋 The latest tooltip preview shows a page, but summary generation is not available.`, 'bot');
+                    }
+                } else {
+                    addMessage('💡 No tooltip previews available yet. Hover over a link to see a tooltip preview, then ask me about it!', 'bot');
+                }
+                return;
+            }
+            
             // Check for key setting intent first
             if (detectKeySettingIntent(message)) {
                 handleKeyExtraction(message);
@@ -2618,15 +3173,43 @@
                         return;
                     }
                     
+                    // Enhance message with tooltip context if available
+                    let enhancedMessage = message;
+                    if (typeof window.enhanceChatMessageWithContext === 'function') {
+                        enhancedMessage = window.enhanceChatMessageWithContext(message);
+                        console.log('🧠 Enhanced chat message with tooltip context');
+                    }
+                    
+                    // Get full tooltip contexts (not just history)
+                    const tooltipContexts = typeof window.getAllTooltipContexts === 'function' 
+                        ? window.getAllTooltipContexts().slice(-10) // Last 10 contexts
+                        : [];
+                    
+                    // Get recent tooltip history
+                    const recentTooltipHistory = typeof window.getTooltipHistory === 'function'
+                        ? window.getTooltipHistory(10)
+                        : (window.tooltipHistory || []).slice(-10);
+                    
                     // Send chat message (backend will use default key if user key not provided)
                     console.log('📤 Sending chat message with API key:', userApiKey ? 'User key provided' : 'No user key (backend will use default)');
+                    console.log('📊 Including tooltip contexts:', tooltipContexts.length, 'contexts');
+                    if (tooltipContexts.length > 0) {
+                        console.log('📊 Tooltip context preview:', {
+                            count: tooltipContexts.length,
+                            latest: tooltipContexts[tooltipContexts.length - 1]?.url,
+                            hasOCR: tooltipContexts.some(ctx => ctx.ocrText),
+                            hasAnalysis: tooltipContexts.some(ctx => ctx.analysis)
+                        });
+                    }
                     chrome.runtime.sendMessage({
                     action: 'chat',
-                    message: message,
+                    message: enhancedMessage, // Enhanced with context
+                    originalMessage: message, // Original user message
                     url: window.location.href,
                     consoleLogs: consoleLogs.slice(-10), // Last 10 console entries
                     pageInfo: pageInfo,
-                    tooltipHistory: window.tooltipHistory || [], // Recent tooltip events for context
+                    tooltipHistory: recentTooltipHistory, // Recent tooltip events for context
+                    tooltipContexts: tooltipContexts, // Full tooltip contexts with analysis, OCR, metadata
                     openaiKey: userApiKey // Optional - backend has default
                 }, (response) => {
                     console.log('📨 Chat response received:', response);

@@ -262,7 +262,10 @@
             <h2 class="section-title">Settings</h2>
 
             <label for="backendUrl">Backend Service URL</label>
-            <input type="url" id="backendUrl" placeholder="http://localhost:3000" required>
+            <input type="url" id="backendUrl" placeholder="https://backend.tooltipcompanion.com" required>
+            <p class="info-text" style="margin-top: 5px;">
+                Default: Production backend (no configuration needed). Use localhost:3000 only for local development.
+            </p>
 
             <label for="openaiKey">OpenAI API Key (Optional - for AI chat features)</label>
             <input type="password" id="openaiKey" placeholder="sk-proj-...">

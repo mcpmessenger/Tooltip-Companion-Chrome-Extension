@@ -38,12 +38,15 @@
 
 ## 🧃 Operation Juicebox
 
-Operation **Juicebox** is our reliability program to harden Tooltip Companion for production scale. Phase 1 is now underway:
+Operation **Juicebox** is our reliability program to harden Tooltip Companion for production scale. **Phase 1 & Phase 2 (CSP)** are complete and ready for deployment:
 
-- Structured JSON logging and health telemetry from the backend (`/health` now exposes retry + circuit breaker stats)
-- Resilient screenshot capture with exponential retries and host-level circuit breakers
-- CSP-aware fallback groundwork (local data-URI delivery for strict banking CSPs)
-- CloudWatch alarm & log-insights scaffolding under `infra/operation-juicebox/`
+- ✅ **Structured JSON logging** and health telemetry (`/health` exposes retry + circuit breaker stats)
+- ✅ **Resilient screenshot capture** with exponential retries and host-level circuit breakers
+- ✅ **CSP-aware fallback** - Data URI delivery for strict banking sites (Wells Fargo, GitHub tested)
+- ✅ **Buffer normalization** - Handles Node.js Buffer objects in screenshot responses
+- 📋 **CloudWatch alarm scaffolding** under `infra/operation-juicebox/` (ready to deploy)
+
+**Current Status:** `operation-juicebox-v1.5` branch ready for production deployment
 
 Track progress in `docs/OPERATION_JUICEBOX.md`.
 
@@ -72,13 +75,15 @@ The AI chat feature requires an OpenAI API key. Here's how to set it up:
 
 ## 🚀 Current Status
 
-**Version:** 1.4.1  
-**Status:** 🚧 Operation Juicebox Phase 1 (backend hardening) in progress
+**Version:** 1.5.0 (Operation Juicebox)  
+**Status:** ✅ Phase 1 & Phase 2 (CSP) complete - Ready for production deployment
 
-### Operation Juicebox Highlights (Phase 1)
-- 🧠 Circuit breaker + retry scaffolding for screenshot capture
-- 📊 `/health` exposes capture metrics, circuit states, and configuration
-- 🪵 Structured JSON logging ready for CloudWatch Logs Insights (see `infra/operation-juicebox`)
+### Operation Juicebox Highlights
+- 🧠 **Circuit breaker + retry** for screenshot capture (exponential backoff, host-level circuit breaking)
+- 📊 **Health telemetry** - `/health` exposes capture metrics, circuit states, and configuration
+- 🪵 **Structured JSON logging** ready for CloudWatch Logs Insights (see `infra/operation-juicebox`)
+- 🛡️ **CSP-aware fallback** - Automatic data URI fallback for strict banking sites
+- 🔧 **Buffer normalization** - Robust handling of Node.js Buffer objects in responses
 
 ### What's New in 1.4.1
 - 🔌 **Model Context Protocol (MCP) Support** - Standard protocol for AI context sharing
