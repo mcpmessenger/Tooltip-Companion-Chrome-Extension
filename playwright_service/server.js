@@ -16,6 +16,11 @@ const logger = require('./logger');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Hardcoded OpenAI API key for backend analysis
+// Replace 'YOUR_OPENAI_API_KEY_HERE' with your actual OpenAI API key
+// Environment variable OPENAI_API_KEY can override this if set
+const BACKEND_OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'YOUR_OPENAI_API_KEY_HERE';
+
 // Middleware
 app.use(cors({
     origin: function (origin, callback) {
@@ -341,13 +346,281 @@ async function extractTextFromScreenshot(screenshotBuffer) {
     }
 }
 
-// Analyze page content and extract key information
-function analyzePageContent(text, url) {
+// Analyze page screenshot using vision model (Phase 3: Visual Context Integration)
+async function analyzePageWithVisionModel(screenshotBuffer, url, apiKey) {
+    const visionLogger = logger.child({ scope: 'analysis.vision', url });
+    
+    // Use hardcoded backend API key (prioritize backend key over passed-in key for security)
+    const apiKeyToUse = BACKEND_OPENAI_API_KEY && BACKEND_OPENAI_API_KEY !== 'YOUR_OPENAI_API_KEY_HERE' 
+        ? BACKEND_OPENAI_API_KEY 
+        : ((apiKey && apiKey.trim()) ? apiKey.trim() : '');
+    
+    if (!apiKeyToUse) {
+        visionLogger.debug({ event: 'analysis.vision.no_key' }, 'No OpenAI API key available, skipping vision analysis');
+        return null;
+    }
+    
+    try {
+        visionLogger.info({ event: 'analysis.vision.start', imageSize: screenshotBuffer.length }, 'Starting vision model analysis');
+        
+        // Encode screenshot as base64
+        const base64Image = screenshotBuffer.toString('base64');
+        
+        const visionPrompt = `Analyze this full-page screenshot of a web page and provide a structured visual summary.
+
+Return a JSON object with the following structure:
+{
+  "layout": "Brief description of the page layout (e.g., 'header with navigation, main content area, sidebar, footer')",
+  "keyElements": ["List of prominent visual elements, buttons, images, or sections visible on the page"],
+  "designStyle": "modern|classic|minimalist|busy|informational|ecommerce|other",
+  "colorScheme": "Brief description of primary colors used",
+  "visualHierarchy": "Description of what draws attention first (e.g., 'large hero image with call-to-action button')",
+  "confidence": 0.0-1.0
+}
+
+Guidelines:
+- layout: Describe the overall page structure and layout
+- keyElements: List 5-10 most important visual elements (buttons, images, forms, sections)
+- designStyle: Assess the design aesthetic
+- colorScheme: Note dominant colors (e.g., "blue and white", "dark theme with orange accents")
+- visualHierarchy: Describe what stands out visually and likely draws user attention first
+- confidence: Rate your confidence in the analysis (0.0-1.0)
+
+IMPORTANT: Return ONLY valid JSON, no additional text or explanation.`;
+
+        const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKeyToUse}`
+            },
+            body: JSON.stringify({
+                model: 'gpt-4o', // Using GPT-4 Omni (has built-in vision capabilities) - alternative: 'gpt-4-turbo' with vision
+                messages: [
+                    {
+                        role: 'user',
+                        content: [
+                            {
+                                type: 'text',
+                                text: visionPrompt
+                            },
+                            {
+                                type: 'image_url',
+                                image_url: {
+                                    url: `data:image/png;base64,${base64Image}`
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens: 600,
+                temperature: 0.3 // Lower temperature for more consistent, structured output
+            })
+        });
+        
+        if (!openaiResponse.ok) {
+            const errorData = await openaiResponse.json().catch(() => ({}));
+            throw new Error(errorData.error?.message || `OpenAI API error: ${openaiResponse.status}`);
+        }
+        
+        const openaiData = await openaiResponse.json();
+        const aiResponseText = openaiData.choices?.[0]?.message?.content || '';
+        
+        // Parse JSON response
+        let visionAnalysis;
+        try {
+            // Extract JSON from response (in case there's extra text)
+            const jsonMatch = aiResponseText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                visionAnalysis = JSON.parse(jsonMatch[0]);
+            } else {
+                throw new Error('No JSON found in vision model response');
+            }
+        } catch (parseError) {
+            visionLogger.warn({ 
+                event: 'analysis.vision.parse_error', 
+                error: parseError.message,
+                responsePreview: aiResponseText.substring(0, 200)
+            }, 'Failed to parse vision model response as JSON');
+            return null;
+        }
+        
+        // Structure the visual summary
+        const visualSummary = {
+            layout: visionAnalysis.layout || '',
+            keyElements: Array.isArray(visionAnalysis.keyElements) ? visionAnalysis.keyElements : [],
+            designStyle: visionAnalysis.designStyle || 'other',
+            colorScheme: visionAnalysis.colorScheme || '',
+            visualHierarchy: visionAnalysis.visualHierarchy || '',
+            confidence: typeof visionAnalysis.confidence === 'number' ? Math.min(1.0, Math.max(0.0, visionAnalysis.confidence)) : 0.7
+        };
+        
+        visionLogger.info({ 
+            event: 'analysis.vision.success',
+            designStyle: visualSummary.designStyle,
+            confidence: visualSummary.confidence,
+            elementsCount: visualSummary.keyElements.length
+        }, 'Vision model analysis completed successfully');
+        
+        return visualSummary;
+        
+    } catch (error) {
+        visionLogger.warn({ 
+            event: 'analysis.vision.error',
+            error: error.message,
+            statusCode: error.statusCode
+        }, 'Vision model analysis failed');
+        return null;
+    }
+}
+
+// Analyze page content using LLM (Phase 1: Semantic Analysis Enrichment)
+async function analyzePageWithLLM(text, url, apiKey) {
+    const analysisLogger = logger.child({ scope: 'analysis.llm', url });
+    
+    // Use hardcoded backend API key (prioritize backend key over passed-in key for security)
+    const apiKeyToUse = BACKEND_OPENAI_API_KEY && BACKEND_OPENAI_API_KEY !== 'YOUR_OPENAI_API_KEY_HERE' 
+        ? BACKEND_OPENAI_API_KEY 
+        : ((apiKey && apiKey.trim()) ? apiKey.trim() : '');
+    
+    if (!apiKeyToUse) {
+        analysisLogger.debug({ event: 'analysis.llm.no_key' }, 'No OpenAI API key available, skipping LLM analysis');
+        return null;
+    }
+    
+    // Limit text length to avoid token limits (GPT-4 has ~8k context window, reserve space for prompt)
+    const maxTextLength = 6000;
+    const truncatedText = text.length > maxTextLength ? text.substring(0, maxTextLength) + '...' : text;
+    
+    try {
+        analysisLogger.info({ event: 'analysis.llm.start', textLength: text.length, truncatedLength: truncatedText.length }, 'Starting LLM-based semantic analysis');
+        
+        const systemPrompt = `You are a web page analysis assistant. Analyze the provided page content and extract structured information.
+
+Return a JSON object with the following structure:
+{
+  "pagePurpose": "A concise summary of what this page is for (1-2 sentences)",
+  "keyCTAs": ["List of primary call-to-action buttons/links found on the page"],
+  "sentiment": "positive|neutral|negative|informational",
+  "pageType": "login|ecommerce|banking|news|article|contact|product|landing|support|documentation|other",
+  "keyTopics": ["topic1", "topic2", "topic3"],
+  "confidence": 0.0-1.0
+}
+
+Guidelines:
+- pagePurpose: Summarize the page's main purpose in 1-2 sentences
+- keyCTAs: Extract actual button labels, links, or action phrases visible on the page (e.g., "Sign Up", "Buy Now", "Learn More")
+- sentiment: Assess overall tone (positive for marketing/sales, neutral for informational, negative for warnings/errors, informational for documentation)
+- pageType: Choose the most appropriate category
+- keyTopics: Extract 3-5 main topics/subjects discussed on the page
+- confidence: Rate your confidence in the analysis (0.0-1.0)
+
+IMPORTANT: Return ONLY valid JSON, no additional text or explanation.`;
+
+        const userPrompt = `Analyze this web page content:
+
+URL: ${url}
+
+Page Text Content:
+${truncatedText}
+
+Return the JSON analysis object as specified.`;
+
+        const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKeyToUse}`
+            },
+            body: JSON.stringify({
+                model: 'gpt-4', // Using GPT-4 for better semantic understanding
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ],
+                max_tokens: 800,
+                temperature: 0.3 // Lower temperature for more consistent, structured output
+            })
+        });
+        
+        if (!openaiResponse.ok) {
+            const errorData = await openaiResponse.json().catch(() => ({}));
+            throw new Error(errorData.error?.message || `OpenAI API error: ${openaiResponse.status}`);
+        }
+        
+        const openaiData = await openaiResponse.json();
+        const aiResponseText = openaiData.choices?.[0]?.message?.content || '';
+        
+        // Parse JSON response
+        let llmAnalysis;
+        try {
+            // Extract JSON from response (in case there's extra text)
+            const jsonMatch = aiResponseText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                llmAnalysis = JSON.parse(jsonMatch[0]);
+            } else {
+                throw new Error('No JSON found in LLM response');
+            }
+        } catch (parseError) {
+            analysisLogger.warn({ 
+                event: 'analysis.llm.parse_error', 
+                error: parseError.message,
+                responsePreview: aiResponseText.substring(0, 200)
+            }, 'Failed to parse LLM response as JSON');
+            return null;
+        }
+        
+        // Map LLM response to our analysis structure
+        const analysis = {
+            pageType: llmAnalysis.pageType || 'unknown',
+            keyTopics: Array.isArray(llmAnalysis.keyTopics) ? llmAnalysis.keyTopics : [],
+            suggestedActions: Array.isArray(llmAnalysis.keyCTAs) ? llmAnalysis.keyCTAs : [],
+            confidence: typeof llmAnalysis.confidence === 'number' ? Math.min(1.0, Math.max(0.0, llmAnalysis.confidence)) : 0.7,
+            // Enhanced fields from LLM
+            pagePurpose: llmAnalysis.pagePurpose || '',
+            sentiment: llmAnalysis.sentiment || 'neutral',
+            analysisMethod: 'llm' // Mark this as LLM-generated
+        };
+        
+        analysisLogger.info({ 
+            event: 'analysis.llm.success',
+            pageType: analysis.pageType,
+            confidence: analysis.confidence,
+            topicsCount: analysis.keyTopics.length,
+            ctasCount: analysis.suggestedActions.length
+        }, 'LLM analysis completed successfully');
+        
+        return analysis;
+        
+    } catch (error) {
+        analysisLogger.warn({ 
+            event: 'analysis.llm.error',
+            error: error.message,
+            statusCode: error.statusCode
+        }, 'LLM analysis failed, will fallback to keyword-based analysis');
+        return null;
+    }
+}
+
+// Analyze page content and extract key information (enhanced with LLM fallback)
+async function analyzePageContent(text, url, options = {}) {
+    const { useLLM = true, apiKey = null } = options;
+    
+    // Try LLM analysis first if enabled and API key available
+    if (useLLM) {
+        const llmAnalysis = await analyzePageWithLLM(text, url, apiKey);
+        if (llmAnalysis) {
+            return llmAnalysis;
+        }
+    }
+    
+    // Fallback to keyword-based analysis
     const analysis = {
         pageType: 'unknown',
         keyTopics: [],
         suggestedActions: [],
-        confidence: 0
+        confidence: 0,
+        analysisMethod: 'keyword' // Mark this as keyword-based
     };
     
     const lowerText = text.toLowerCase();
@@ -487,7 +760,50 @@ async function captureScreenshot(url, options = {}) {
 
             await page.waitForTimeout(1000);
 
-            const screenshot = await page.screenshot({
+            // Phase 2: Extract HTML metadata (title, meta description, h1 tags)
+            let htmlMetadata = {
+                title: '',
+                metaDescription: '',
+                h1Tags: []
+            };
+            
+            try {
+                htmlMetadata.title = await page.title().catch(() => '');
+                
+                // Extract meta description
+                const metaDescription = await page.$eval('meta[name="description"]', el => el.content).catch(() => null);
+                if (metaDescription) {
+                    htmlMetadata.metaDescription = metaDescription;
+                }
+                
+                // Extract all visible h1 tags
+                htmlMetadata.h1Tags = await page.$$eval('h1', elements => {
+                    return elements
+                        .filter(el => {
+                            // Only include visible elements
+                            const style = window.getComputedStyle(el);
+                            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                        })
+                        .map(el => el.textContent.trim())
+                        .filter(text => text.length > 0);
+                }).catch(() => []);
+                
+                attemptLogger.debug({
+                    event: 'capture.html_metadata_extracted',
+                    hasTitle: !!htmlMetadata.title,
+                    hasMetaDescription: !!htmlMetadata.metaDescription,
+                    h1Count: htmlMetadata.h1Tags.length
+                }, 'HTML metadata extracted');
+            } catch (metadataError) {
+                attemptLogger.warn({
+                    event: 'capture.html_metadata_error',
+                    error: metadataError.message
+                }, 'Failed to extract HTML metadata, continuing without it');
+            }
+
+            // Phase 3: Capture full-page screenshot for visual analysis
+            // Capture both viewport (for tooltip display) and full-page (for vision model)
+            const viewportScreenshot = await page.screenshot({
                 fullPage: false,
                 type: 'png',
                 clip: {
@@ -497,11 +813,55 @@ async function captureScreenshot(url, options = {}) {
                     height: 600
                 }
             });
+            
+            // Capture full-page screenshot for vision model analysis
+            let fullPageScreenshot = null;
+            try {
+                fullPageScreenshot = await page.screenshot({
+                    fullPage: true,
+                    type: 'png'
+                });
+                attemptLogger.debug({
+                    event: 'capture.fullpage_screenshot',
+                    size: fullPageScreenshot.length
+                }, 'Full-page screenshot captured for vision analysis');
+            } catch (fullPageError) {
+                attemptLogger.warn({
+                    event: 'capture.fullpage_error',
+                    error: fullPageError.message
+                }, 'Failed to capture full-page screenshot, using viewport only');
+                // Fallback: use viewport screenshot if full-page fails
+                fullPageScreenshot = viewportScreenshot;
+            }
+            
+            // Use viewport screenshot for tooltip display
+            const screenshot = viewportScreenshot;
 
             const token = await saveScreenshotToDisk(screenshot, url);
             const diskScreenshotUrl = token ? getScreenshotUrl(token) : null;
             const extractedText = await extractTextFromScreenshot(screenshot);
-            const analysis = analyzePageContent(extractedText, url);
+            
+            // Phase 3: Analyze full-page screenshot with vision model (GPT-4V)
+            let visualSummary = null;
+            if (fullPageScreenshot) {
+                visualSummary = await analyzePageWithVisionModel(fullPageScreenshot, url, BACKEND_OPENAI_API_KEY);
+            }
+            
+            // Phase 1: Enhanced analysis with LLM support (async)
+            const analysis = await analyzePageContent(extractedText, url, { 
+                useLLM: true, 
+                apiKey: BACKEND_OPENAI_API_KEY 
+            });
+            
+            // Phase 2: Integrate HTML metadata into analysis
+            if (analysis) {
+                analysis.htmlMetadata = htmlMetadata;
+                
+                // Phase 3: Integrate visual summary into analysis
+                if (visualSummary) {
+                    analysis.visualSummary = visualSummary;
+                }
+            }
 
             const base64Screenshot = screenshot.toString('base64');
             const dataUri = `data:image/png;base64,${base64Screenshot}`;
@@ -1087,9 +1447,9 @@ app.get('/health', (req, res) => {
             chat: true
         },
         config: {
-            openaiKeyConfigured: !!(process.env.OPENAI_API_KEY),
-            openaiKeyLength: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0,
-            openaiKeyPrefix: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.substring(0, 7) + '...' : 'not set'
+            openaiKeyConfigured: !!(BACKEND_OPENAI_API_KEY && BACKEND_OPENAI_API_KEY !== 'YOUR_OPENAI_API_KEY_HERE'),
+            openaiKeyLength: BACKEND_OPENAI_API_KEY && BACKEND_OPENAI_API_KEY !== 'YOUR_OPENAI_API_KEY_HERE' ? BACKEND_OPENAI_API_KEY.length : 0,
+            openaiKeyPrefix: BACKEND_OPENAI_API_KEY && BACKEND_OPENAI_API_KEY !== 'YOUR_OPENAI_API_KEY_HERE' ? BACKEND_OPENAI_API_KEY.substring(0, 7) + '...' : 'not set'
         },
         metrics: {
             capture: {
@@ -1152,12 +1512,53 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
                     }
                     tooltipContextInfo += '\n';
                     
+                    // Phase 2: Include HTML metadata if available
+                    if (analysis.htmlMetadata) {
+                        if (analysis.htmlMetadata.title) {
+                            tooltipContextInfo += `Page Title: ${analysis.htmlMetadata.title}\n`;
+                        }
+                        if (analysis.htmlMetadata.metaDescription) {
+                            tooltipContextInfo += `Description: ${analysis.htmlMetadata.metaDescription}\n`;
+                        }
+                        if (analysis.htmlMetadata.h1Tags && analysis.htmlMetadata.h1Tags.length > 0) {
+                            tooltipContextInfo += `Main Headings: ${analysis.htmlMetadata.h1Tags.join('; ')}\n`;
+                        }
+                    }
+                    
+                    // Phase 1: Include enhanced LLM analysis fields
+                    if (analysis.pagePurpose) {
+                        tooltipContextInfo += `Page Purpose: ${analysis.pagePurpose}\n`;
+                    }
+                    if (analysis.sentiment) {
+                        tooltipContextInfo += `Sentiment: ${analysis.sentiment}\n`;
+                    }
+                    
                     if (analysis.keyTopics && analysis.keyTopics.length > 0) {
                         tooltipContextInfo += `Key Topics: ${analysis.keyTopics.join(', ')}\n`;
                     }
                     
                     if (analysis.suggestedActions && analysis.suggestedActions.length > 0) {
                         tooltipContextInfo += `**Available Actions:** ${analysis.suggestedActions.join('; ')}\n`;
+                    }
+                    
+                    // Phase 3: Include visual summary if available
+                    if (analysis.visualSummary) {
+                        tooltipContextInfo += `\n**Visual Analysis:**\n`;
+                        if (analysis.visualSummary.layout) {
+                            tooltipContextInfo += `Layout: ${analysis.visualSummary.layout}\n`;
+                        }
+                        if (analysis.visualSummary.designStyle) {
+                            tooltipContextInfo += `Design Style: ${analysis.visualSummary.designStyle}\n`;
+                        }
+                        if (analysis.visualSummary.colorScheme) {
+                            tooltipContextInfo += `Colors: ${analysis.visualSummary.colorScheme}\n`;
+                        }
+                        if (analysis.visualSummary.visualHierarchy) {
+                            tooltipContextInfo += `Visual Focus: ${analysis.visualSummary.visualHierarchy}\n`;
+                        }
+                        if (analysis.visualSummary.keyElements && analysis.visualSummary.keyElements.length > 0) {
+                            tooltipContextInfo += `Key Visual Elements: ${analysis.visualSummary.keyElements.slice(0, 5).join(', ')}\n`;
+                        }
                     }
                 }
                 
@@ -1182,16 +1583,42 @@ async function processChatRequest(message, currentUrl, url, openaiKey, tooltipHi
         const analysis = pageAnalysisCache.get(actualUrl);
         if (analysis) {
             currentPageContext = `\n\n**Current Page Context:**\n- Page type: ${analysis.pageType}\n- Key topics: ${analysis.keyTopics.join(', ') || 'none'}\n- Suggestions: ${analysis.suggestedActions.join('; ') || 'none'}`;
+            
+            // Phase 2: Add HTML metadata
+            if (analysis.htmlMetadata) {
+                if (analysis.htmlMetadata.title) {
+                    currentPageContext += `\n- Page title: ${analysis.htmlMetadata.title}`;
+                }
+                if (analysis.htmlMetadata.metaDescription) {
+                    currentPageContext += `\n- Description: ${analysis.htmlMetadata.metaDescription}`;
+                }
+            }
+            
+            // Phase 1: Add LLM-enhanced fields
+            if (analysis.pagePurpose) {
+                currentPageContext += `\n- Purpose: ${analysis.pagePurpose}`;
+            }
+            if (analysis.sentiment) {
+                currentPageContext += `\n- Sentiment: ${analysis.sentiment}`;
+            }
+            
+            // Phase 3: Add visual summary
+            if (analysis.visualSummary) {
+                currentPageContext += `\n- Visual: ${analysis.visualSummary.layout || 'N/A'} (${analysis.visualSummary.designStyle || 'unknown'} style)`;
+            }
         }
     }
     
-    // Use OpenAI key from request if provided, otherwise use backend's default key
-    const apiKeyToUse = (openaiKey && openaiKey.trim()) ? openaiKey.trim() : (process.env.OPENAI_API_KEY || '');
+    // Use hardcoded backend API key (prioritize backend key for security)
+    // User-provided keys are still supported for chat, but backend uses its own key for analysis
+    const apiKeyToUse = BACKEND_OPENAI_API_KEY && BACKEND_OPENAI_API_KEY !== 'YOUR_OPENAI_API_KEY_HERE'
+        ? BACKEND_OPENAI_API_KEY
+        : ((openaiKey && openaiKey.trim()) ? openaiKey.trim() : '');
     
     chatLogger.debug({
         event: 'chat.api_key_check',
         userProvided: !!(openaiKey && openaiKey.trim()),
-        backendKey: !!(process.env.OPENAI_API_KEY),
+        backendKey: !!(BACKEND_OPENAI_API_KEY && BACKEND_OPENAI_API_KEY !== 'YOUR_OPENAI_API_KEY_HERE'),
         keyPreview: apiKeyToUse ? `${apiKeyToUse.substring(0, 10)}...` : 'NONE'
     }, 'Evaluated API key sources');
     
@@ -1215,6 +1642,9 @@ You are a page-aware assistant. You understand what pages contain, what actions 
 - OCR text from page screenshots (actual visible content)
 - Page type analysis (banking, ecommerce, login, etc.)
 - Key topics, suggested actions, rates, bonuses, requirements
+- HTML metadata (page title, description, headings)
+- Visual analysis (layout, design style, color scheme, key visual elements)
+- Semantic analysis (page purpose, sentiment, call-to-actions)
 
 **HOW TO RESPOND:**
 1. **For "how do I" questions**: Provide clear, numbered step-by-step instructions based on page content

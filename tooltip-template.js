@@ -130,16 +130,8 @@ function renderTooltipTemplate(data, options = {}) {
         `;
     }
 
-    // URL footer (for chat mode)
-    if (mode === 'chat' && url) {
-        html += `
-            <div class="template-url-footer">
-                <a href="${url}" target="_blank" rel="noopener noreferrer" class="template-url-link">
-                    ${url}
-                </a>
-            </div>
-        `;
-    }
+    // URL footer removed - links are already available on the page being browsed
+    // (Previously shown in chat mode, but removed per user request)
 
     html += `</div>`;
 

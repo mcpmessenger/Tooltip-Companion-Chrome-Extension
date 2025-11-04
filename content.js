@@ -521,6 +521,63 @@
                 document.head.appendChild(styleSheet);
             }
             
+            // Inject light mode overrides for template styles
+            const lightModeOverridesId = 'tooltip-template-light-mode-overrides';
+            let lightModeOverrides = document.getElementById(lightModeOverridesId);
+            if (!lightModeOverrides) {
+                lightModeOverrides = document.createElement('style');
+                lightModeOverrides.id = lightModeOverridesId;
+                document.head.appendChild(lightModeOverrides);
+            }
+            
+            // Check current theme and update overrides
+            const isDarkMode = typeof window.chatThemeDarkMode !== 'undefined' ? window.chatThemeDarkMode : 
+                              (localStorage.getItem('chat-theme') === 'dark');
+            
+            if (!isDarkMode) {
+                // Light mode: force dark text for all template elements
+                lightModeOverrides.textContent = `
+                    .tooltip-template-chat,
+                    .tooltip-template-popup {
+                        color: #1a1a1a !important;
+                    }
+                    .tooltip-template-chat *,
+                    .tooltip-template-popup * {
+                        color: #1a1a1a !important;
+                    }
+                    .template-page-type,
+                    .template-page-type-name {
+                        color: #1a1a1a !important;
+                    }
+                    .template-topics,
+                    .template-actions,
+                    .template-topics-text,
+                    .template-actions-text {
+                        color: #1a1a1a !important;
+                    }
+                    .template-text-preview,
+                    .template-text-content {
+                        color: #1a1a1a !important;
+                    }
+                    .template-confidence {
+                        color: rgba(0, 0, 0, 0.5) !important;
+                    }
+                    .template-url-link {
+                        color: rgba(0, 0, 0, 0.6) !important;
+                    }
+                    .template-url-link:hover {
+                        color: rgba(0, 0, 0, 0.9) !important;
+                    }
+                    .template-screenshot-error,
+                    .template-screenshot-loading {
+                        color: #1a1a1a !important;
+                    }
+                `;
+            } else {
+                // Dark mode: use light text (default template styles)
+                lightModeOverrides.textContent = '';
+            }
+            
             // Render template for chat mode (without screenshots)
             // Don't pass screenshotUrl in chat mode to prevent any rendering
             const templateHtml = window.TooltipTemplate.render({
@@ -571,6 +628,32 @@
             
             // Insert template HTML
             contentDiv.innerHTML = templateHtml;
+            
+            // Force dark text color in light mode for ALL elements (override any inline styles)
+            if (!darkMode) {
+                // Set base color first
+                contentDiv.style.color = '#1a1a1a';
+                
+                // Force all text elements to be dark, regardless of their current color
+                setTimeout(() => {
+                    const allElements = contentDiv.querySelectorAll('*');
+                    allElements.forEach(el => {
+                        // Force dark color for all text elements
+                        el.style.color = '#1a1a1a';
+                        // Remove any existing color styles and add dark color with !important
+                        let currentStyle = el.getAttribute('style') || '';
+                        // Remove color-related styles
+                        currentStyle = currentStyle.replace(/color\s*:[^;]+;?/gi, '');
+                        currentStyle = currentStyle.replace(/color\s*:[^;]+!important;?/gi, '');
+                        el.setAttribute('style', currentStyle + ' color: #1a1a1a !important;');
+                    });
+                    // Force text color on the container itself
+                    let containerStyle = contentDiv.getAttribute('style') || '';
+                    containerStyle = containerStyle.replace(/color\s*:[^;]+;?/gi, '');
+                    containerStyle = containerStyle.replace(/color\s*:[^;]+!important;?/gi, '');
+                    contentDiv.setAttribute('style', containerStyle + ' color: #1a1a1a !important;');
+                }, 50);
+            }
             
             messageDiv.appendChild(contentDiv);
             
@@ -2308,9 +2391,11 @@
                     flex-direction: column; 
                     overflow: hidden;
                     min-width: 280px;
-                    max-width: 400px;
+                    max-width: 90vw;
+                    min-height: 300px;
                     max-height: calc(100vh - 100px);
-                    transition: opacity 0.2s ease-in-out;">
+                    transition: opacity 0.2s ease-in-out;
+                    resize: none;">
                     <div class="chat-header" style="background: rgba(0, 0, 0, 0.3); 
                         border-bottom: 1px solid rgba(255, 255, 255, 0.08);
                         color: #e8e8e8; 
@@ -2325,7 +2410,7 @@
                             <span class="chat-title" style="font-weight: 500; font-size: 13px; color: #ffffff; letter-spacing: 0.01em;">Tooltip Companion</span>
                         </div>
                         <div style="display: flex; gap: 6px; align-items: center;">
-                            <button class="chat-theme-toggle" id="chat-theme-toggle" title="Toggle light/dark mode" style="background: transparent; border: none; color: rgba(255, 255, 255, 0.6); font-size: 16px; cursor: pointer; padding: 4px 6px; transition: all 0.2s; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 4px;">🌙</button>
+                            <button class="chat-theme-toggle" id="chat-theme-toggle" title="Toggle light/dark mode" style="background: transparent; border: none; color: rgba(0, 0, 0, 0.6); font-size: 16px; cursor: pointer; padding: 4px 6px; transition: all 0.2s; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 4px;">🌙</button>
                             <button class="chat-close" style="background: transparent; border: none; color: rgba(255, 255, 255, 0.6); font-size: 18px; cursor: pointer; padding: 2px 6px; transition: all 0.2s; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 4px;">✕</button>
                         </div>
                     </div>
@@ -2376,6 +2461,30 @@
                             align-items: center;
                             justify-content: center;
                             flex-shrink: 0;">➤</button>
+                    </div>
+                    <div class="chat-resize-handle" id="chat-resize-handle" style="
+                        position: absolute;
+                        bottom: 0;
+                        right: 0;
+                        width: 24px;
+                        height: 24px;
+                        cursor: nwse-resize;
+                        z-index: 10;
+                        background: transparent;
+                        border-radius: 0 0 20px 0;
+                        display: flex;
+                        align-items: flex-end;
+                        justify-content: flex-end;
+                        padding: 2px;
+                    " title="Drag to resize">
+                        <div style="
+                            width: 0;
+                            height: 0;
+                            border-left: 8px solid transparent;
+                            border-bottom: 8px solid rgba(0, 0, 0, 0.2);
+                            margin-bottom: 2px;
+                            margin-right: 2px;
+                        "></div>
                     </div>
                 </div>
                 <button class="chat-toggle" id="chat-toggle" style="
@@ -2432,7 +2541,7 @@
                     
                     const container = document.createElement('div');
                     container.className = 'chat-container';
-                    container.style.cssText = 'position: absolute; bottom: 70px; right: 0; width: 320px; background: rgba(15, 15, 15, 0.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 1px rgba(255, 255, 255, 0.1); display: none; flex-direction: column; overflow: hidden; min-width: 280px; max-width: 400px; max-height: calc(100vh - 100px); transition: opacity 0.2s ease-in-out;';
+                    container.style.cssText = 'position: absolute; bottom: 70px; right: 0; width: 320px; background: rgba(15, 15, 15, 0.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 1px rgba(255, 255, 255, 0.1); display: none; flex-direction: column; overflow: hidden; min-width: 280px; max-width: 90vw; min-height: 300px; max-height: calc(100vh - 100px); transition: opacity 0.2s ease-in-out; resize: none;';
                     
                     const toggle = document.createElement('button');
                     toggle.className = 'chat-toggle';
@@ -2533,15 +2642,18 @@
         
         let isOpen = false;
         let isMinimized = false;
-        let isDarkMode = true; // Default to dark mode
+        let isDarkMode = false; // Default to light mode
         
         // Load saved theme preference
         try {
             const savedTheme = localStorage.getItem('chat-theme');
-            if (savedTheme === 'light') {
-                isDarkMode = false;
+            if (savedTheme === 'dark') {
+                isDarkMode = true;
             }
         } catch (e) {}
+        
+        // Set global theme variable for template overrides
+        window.chatThemeDarkMode = isDarkMode;
         
         // Apply theme (must be called after all elements are defined)
         function applyTheme() {
@@ -2551,7 +2663,7 @@
             }
             
             if (isDarkMode) {
-                // Dark mode (obsidian glass)
+                // Dark mode (obsidian glass) - light text
                 chatContainer.style.background = 'rgba(15, 15, 15, 0.85)';
                 chatContainer.style.borderColor = 'rgba(255, 255, 255, 0.1)';
                 chatHeader.style.background = 'rgba(0, 0, 0, 0.3)';
@@ -2569,11 +2681,18 @@
                 chatSend.style.borderColor = 'rgba(255, 255, 255, 0.2)';
                 chatUpload.style.background = 'rgba(255, 255, 255, 0.08)';
                 chatUpload.style.borderColor = 'rgba(255, 255, 255, 0.12)';
-                themeToggle.innerHTML = '🌙';
+                themeToggle.innerHTML = '☀️'; // Dark mode shows sun (click to switch to light)
                 themeToggle.style.color = 'rgba(255, 255, 255, 0.6)';
                 closeBtn.style.color = 'rgba(255, 255, 255, 0.6)';
+                
+                // Force light text color in dark mode for all messages
+                chatMessages.style.color = '#e8e8e8';
+                const allMessageElements = chatMessages.querySelectorAll('*');
+                allMessageElements.forEach(el => {
+                    el.style.color = '#e8e8e8';
+                });
             } else {
-                // Light mode (clean glass)
+                // Light mode (clean glass) - dark text
                 chatContainer.style.background = 'rgba(255, 255, 255, 0.95)';
                 chatContainer.style.borderColor = 'rgba(0, 0, 0, 0.1)';
                 chatHeader.style.background = 'rgba(255, 255, 255, 0.9)';
@@ -2591,13 +2710,34 @@
                 chatSend.style.borderColor = '#667eea';
                 chatUpload.style.background = 'rgba(102, 126, 234, 0.1)';
                 chatUpload.style.borderColor = 'rgba(102, 126, 234, 0.2)';
-                themeToggle.innerHTML = '☀️';
+                themeToggle.innerHTML = '🌙'; // Light mode shows moon (click to switch to dark)
                 themeToggle.style.color = 'rgba(0, 0, 0, 0.6)';
                 closeBtn.style.color = 'rgba(0, 0, 0, 0.6)';
+                
+                // Force dark text color in light mode for ALL messages and elements
+                chatMessages.style.color = '#1a1a1a';
+                const allMessageElements = chatMessages.querySelectorAll('*');
+                allMessageElements.forEach(el => {
+                    el.style.color = '#1a1a1a';
+                    // Override any inline styles
+                    const currentStyle = el.getAttribute('style') || '';
+                    if (!currentStyle.includes('color:')) {
+                        el.setAttribute('style', currentStyle + ' color: #1a1a1a !important;');
+                    }
+                });
             }
             
             // Update input placeholder
             chatInput.setAttribute('placeholder', 'Type a message...');
+            
+            // Update resize handle triangle color
+            const resizeHandle = document.getElementById('chat-resize-handle');
+            if (resizeHandle) {
+                const triangle = resizeHandle.querySelector('div');
+                if (triangle) {
+                    triangle.style.borderBottomColor = isDarkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)';
+                }
+            }
             
             // Save preference
             try {
@@ -2612,12 +2752,71 @@
         themeToggle.addEventListener('click', (e) => {
             e.stopPropagation(); // Prevent dragging
             isDarkMode = !isDarkMode;
+            
+            // Update global theme variable for template overrides
+            window.chatThemeDarkMode = isDarkMode;
+            
             applyTheme();
             
-            // Update message bubbles to match theme
+            // Update light mode CSS overrides
+            const lightModeOverridesId = 'tooltip-template-light-mode-overrides';
+            let lightModeOverrides = document.getElementById(lightModeOverridesId);
+            if (!lightModeOverrides) {
+                lightModeOverrides = document.createElement('style');
+                lightModeOverrides.id = lightModeOverridesId;
+                document.head.appendChild(lightModeOverrides);
+            }
+            
+            if (!isDarkMode) {
+                // Light mode: force dark text
+                lightModeOverrides.textContent = `
+                    .tooltip-template-chat,
+                    .tooltip-template-popup {
+                        color: #1a1a1a !important;
+                    }
+                    .tooltip-template-chat *,
+                    .tooltip-template-popup * {
+                        color: #1a1a1a !important;
+                    }
+                    .template-page-type,
+                    .template-page-type-name {
+                        color: #1a1a1a !important;
+                    }
+                    .template-topics,
+                    .template-actions,
+                    .template-topics-text,
+                    .template-actions-text {
+                        color: #1a1a1a !important;
+                    }
+                    .template-text-preview,
+                    .template-text-content {
+                        color: #1a1a1a !important;
+                    }
+                    .template-confidence {
+                        color: rgba(0, 0, 0, 0.5) !important;
+                    }
+                    .template-url-link {
+                        color: rgba(0, 0, 0, 0.6) !important;
+                    }
+                    .template-url-link:hover {
+                        color: rgba(0, 0, 0, 0.9) !important;
+                    }
+                    .template-screenshot-error,
+                    .template-screenshot-loading {
+                        color: #1a1a1a !important;
+                    }
+                `;
+            } else {
+                // Dark mode: clear overrides (use default light text)
+                lightModeOverrides.textContent = '';
+            }
+            
+            // Update ALL message elements to match theme (force text color)
             const allMessages = chatMessages.querySelectorAll('.chat-message');
             allMessages.forEach(msg => {
                 const content = msg.querySelector('.message-content');
+                if (!content) return;
+                
                 if (msg.classList.contains('user')) {
                     if (isDarkMode) {
                         content.style.background = 'rgba(255, 255, 255, 0.15)';
@@ -2639,6 +2838,22 @@
                         content.style.borderColor = 'rgba(102, 126, 234, 0.2)';
                     }
                 }
+                
+                // Force all child elements to have correct text color
+                const targetColor = isDarkMode ? '#e8e8e8' : '#1a1a1a';
+                const allChildren = content.querySelectorAll('*');
+                allChildren.forEach(child => {
+                    // Remove existing color styles
+                    let currentStyle = child.getAttribute('style') || '';
+                    currentStyle = currentStyle.replace(/color\s*:[^;]+;?/gi, '');
+                    currentStyle = currentStyle.replace(/color\s*:[^;]+!important;?/gi, '');
+                    child.setAttribute('style', currentStyle + ` color: ${targetColor} !important;`);
+                });
+                // Also set on content itself
+                let containerStyle = content.getAttribute('style') || '';
+                containerStyle = containerStyle.replace(/color\s*:[^;]+;?/gi, '');
+                containerStyle = containerStyle.replace(/color\s*:[^;]+!important;?/gi, '');
+                content.setAttribute('style', containerStyle + ` color: ${targetColor} !important;`);
             });
         });
         
@@ -2826,9 +3041,105 @@
             }
         }
         
-        // Update container height dynamically based on content
+        // Resize functionality
+        let isResizing = false;
+        let resizeStartX = 0;
+        let resizeStartY = 0;
+        let resizeStartWidth = 0;
+        let resizeStartHeight = 0;
+        let hasManualSize = false; // Track if user has manually resized
+        
+        // Load saved size
+        function loadSize() {
+            try {
+                const size = JSON.parse(localStorage.getItem('chat-widget-size'));
+                if (size && size.width && size.height) {
+                    chatContainer.style.width = size.width + 'px';
+                    chatContainer.style.height = size.height + 'px';
+                    hasManualSize = true; // Mark as manually resized if size was loaded
+                }
+            } catch (e) {}
+        }
+        
+        // Save size
+        function saveSize(width, height) {
+            try {
+                localStorage.setItem('chat-widget-size', JSON.stringify({ width, height }));
+            } catch (e) {}
+        }
+        
+        // Load saved size on init
+        loadSize();
+        
+        // Get resize handle
+        const resizeHandle = document.getElementById('chat-resize-handle');
+        if (resizeHandle) {
+            // Visual indicator on hover
+            resizeHandle.addEventListener('mouseenter', () => {
+                resizeHandle.style.background = isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)';
+                const triangle = resizeHandle.querySelector('div');
+                if (triangle) {
+                    triangle.style.borderBottomColor = isDarkMode ? 'rgba(255, 255, 255, 0.4)' : 'rgba(0, 0, 0, 0.4)';
+                }
+            });
+            resizeHandle.addEventListener('mouseleave', () => {
+                if (!isResizing) {
+                    resizeHandle.style.background = 'transparent';
+                    const triangle = resizeHandle.querySelector('div');
+                    if (triangle) {
+                        triangle.style.borderBottomColor = isDarkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)';
+                    }
+                }
+            });
+            
+            // Start resize
+            resizeHandle.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                isResizing = true;
+                resizeStartX = e.clientX;
+                resizeStartY = e.clientY;
+                resizeStartWidth = chatContainer.offsetWidth;
+                resizeStartHeight = chatContainer.offsetHeight;
+                resizeHandle.style.background = 'rgba(255, 255, 255, 0.15)';
+                document.body.style.cursor = 'nwse-resize';
+                document.body.style.userSelect = 'none';
+            });
+        }
+        
+        // Handle resize on mousemove
+        document.addEventListener('mousemove', (e) => {
+            if (isResizing) {
+                e.preventDefault();
+                const deltaX = e.clientX - resizeStartX;
+                const deltaY = e.clientY - resizeStartY;
+                
+                const newWidth = Math.max(280, Math.min(resizeStartWidth + deltaX, window.innerWidth - 40));
+                const newHeight = Math.max(300, Math.min(resizeStartHeight + deltaY, window.innerHeight - 100));
+                
+                chatContainer.style.width = newWidth + 'px';
+                chatContainer.style.height = newHeight + 'px';
+            }
+        });
+        
+        // End resize on mouseup
+        document.addEventListener('mouseup', (e) => {
+            if (isResizing) {
+                isResizing = false;
+                resizeHandle.style.background = 'transparent';
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                
+                // Save new size
+                saveSize(chatContainer.offsetWidth, chatContainer.offsetHeight);
+                hasManualSize = true; // Mark as manually resized
+            }
+        });
+        
+        // Update container height dynamically based on content (only if not manually resized)
         function updateChatHeight() {
             if (!isOpen) return;
+            if (hasManualSize) return; // Don't override manual resize
             
             const messagesHeight = chatMessages.scrollHeight;
             const headerHeight = chatContainer.querySelector('.chat-header').offsetHeight;
@@ -3550,12 +3861,34 @@
             contentDiv.style.boxShadow = '0 1px 2px rgba(0, 0, 0, 0.05)';
             contentDiv.style.whiteSpace = 'pre-wrap';
             
+            // Force dark text in light mode
+            if (!isDarkMode) {
+                contentDiv.style.color = '#1a1a1a';
+            }
+            
             const p = document.createElement('p');
             p.style.margin = '0';
             p.style.color = 'inherit';
             p.textContent = text;
             
             contentDiv.appendChild(p);
+            
+            // In light mode, force ALL text to be dark (override any styles)
+            if (!isDarkMode) {
+                // Set immediately
+                contentDiv.style.color = '#1a1a1a';
+                
+                // Force all child elements to be dark
+                setTimeout(() => {
+                    const allElements = contentDiv.querySelectorAll('*');
+                    allElements.forEach(el => {
+                        // Force dark color with !important
+                        el.setAttribute('style', (el.getAttribute('style') || '') + ' color: #1a1a1a !important;');
+                    });
+                    // Force on container
+                    contentDiv.setAttribute('style', (contentDiv.getAttribute('style') || '') + ' color: #1a1a1a !important;');
+                }, 10);
+            }
             messageDiv.appendChild(contentDiv);
             chatMessages.appendChild(messageDiv);
         }
