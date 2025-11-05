@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tooltip Companion",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "AI-powered tooltip previews for links with context-aware assistance. Visit tooltipcompanion.com",
   "icons": {
     "16": "icons/icon16.png",
